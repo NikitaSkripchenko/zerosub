@@ -395,3 +395,46 @@ describe("disabling an account", () => {
     expect(reopened).toHaveLength(2);
   });
 });
+
+describe("changing the default account", () => {
+  const openedAt = "2026-09-23T07:00:00.000Z";
+  const stateWithLiveAgent = () => ({
+    accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
+    defaults: { claude: MAIN, codex: null },
+    bindings: {},
+    sessions: { [AGENT]: { accountId: MAIN, family: "claude" as const, openedAt } },
+  });
+
+  it("moves agents that follow the default", async () => {
+    const { service, store, reopened } = await setUp(stateWithLiveAgent(), () => ({
+      kind: "window",
+      resetsAt: inFuture(),
+      message: "",
+    }));
+    const paseo = fakePaseo().paseo as never;
+
+    const summary = await service.setDefault(paseo, HELLO);
+    expect(summary.reopened).toEqual([AGENT]);
+    expect(reopened).toEqual([AGENT]);
+    expect((await store.read()).defaults.claude).toBe(HELLO);
+  });
+
+  it("leaves running agents where they are when that preference is off", async () => {
+    const { service, store, reopened } = await setUp(stateWithLiveAgent(), () => ({
+      kind: "window",
+      resetsAt: inFuture(),
+      message: "",
+    }));
+    service.setPreferences(preferences.schema.parse({ moveAgentsOnDefaultChange: false }));
+    const paseo = fakePaseo().paseo as never;
+
+    const summary = await service.setDefault(paseo, HELLO);
+    expect(summary.reopened).toEqual([]);
+    expect(reopened).toEqual([]);
+    const state = await store.read();
+    expect(state.defaults.claude).toBe(HELLO); // the default still changed, for new agents
+    expect(state.sessions[AGENT]?.accountId).toBe(MAIN);
+    // Pinned where it runs, so resuming it later doesn't drift to the new default either.
+    expect(state.bindings[AGENT]).toMatchObject({ accountId: MAIN });
+  });
+});

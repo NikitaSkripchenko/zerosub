@@ -84,6 +84,7 @@ const DEFAULT_PREFERENCES: Preferences = {
   autoSwitch: true,
   autoContinue: true,
   continuePrompt: DEFAULT_CONTINUE_PROMPT,
+  moveAgentsOnDefaultChange: true,
   balanceNewAgents: false,
   showComposerPill: true,
   autoRedeem: false,
@@ -1303,7 +1304,9 @@ export class Service {
     if (!account) throw new Error("That account no longer exists.");
     if (!account.signedIn) throw new Error(`${account.label} is signed out. Sign it in first.`);
     if (account.disabled) throw new Error(`${account.label} is disabled. Enable it before making it the default.`);
-    if (!this.adapters[account.family].portable) await this.pinThreads(paseo, account.family);
+    if (!this.adapters[account.family].portable) await this.pinThreads(paseo, account.family, "threads");
+    // The new default is for what comes next: agents already open stay on the account they run on.
+    else if (!this.prefs.moveAgentsOnDefaultChange) await this.pinThreads(paseo, account.family, "open-agents");
     await this.store.update((draft) => {
       draft.defaults[account.family] = account.id;
     });
@@ -1346,22 +1349,37 @@ export class Service {
   }
 
   /**
-   * Pins every existing agent of a non-portable provider to the account it runs on now, before the
-   * default changes. Agents that haven't opened a session since ZeroSub was installed have no pin yet.
+   * Pins existing agents to the account they run on now, before the default changes. Agents that
+   * haven't opened a session since ZeroSub was installed have no pin yet.
+   *
+   * `threads`: every agent of a non-portable provider, archived ones included, because its
+   * conversation can never change accounts. `open-agents`: the agents open right now on a portable
+   * provider, when the user would rather a new default didn't move work already under way; the pin
+   * reads as a plugin decision, so the pill still offers "Follow default" to undo it.
    */
-  private async pinThreads(paseo: PaseoApi, family: Family): Promise<void> {
+  private async pinThreads(paseo: PaseoApi, family: Family, mode: "threads" | "open-agents"): Promise<void> {
+    const threads = mode === "threads";
     const families = await this.families.resolve(paseo);
-    const { agents } = await listAgents(paseo, true);
+    const { agents } = await listAgents(paseo, threads);
     const state = await this.store.read();
     const current = defaultAccount(state, family);
-    const unpinned = agents.filter((agent) => families[agent.provider] === family && !state.bindings[agent.id]);
+    const unpinned = agents.filter(
+      (agent) =>
+        families[agent.provider] === family &&
+        !state.bindings[agent.id] &&
+        (threads || (!agent.archived && isLive(agent.status))),
+    );
     if (!current || unpinned.length === 0) return;
     const at = new Date().toISOString();
     await this.store.update((draft) => {
       for (const agent of unpinned) {
         if (draft.bindings[agent.id]) continue;
         // A thread lives where its session ran: the CLI login when ZeroSub never routed it.
-        draft.bindings[agent.id] = { accountId: this.runningOn(draft, agent.id, family) ?? current.id, source: "thread", at };
+        draft.bindings[agent.id] = {
+          accountId: this.runningOn(draft, agent.id, family) ?? current.id,
+          source: threads ? "thread" : "auto",
+          at,
+        };
       }
     });
   }

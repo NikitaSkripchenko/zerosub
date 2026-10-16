@@ -15,6 +15,12 @@ export const preferences = defineSettings({
     /** After an automatic switch, send a follow-up so the interrupted turn keeps going. */
     autoContinue: z.boolean().default(true),
     continuePrompt: z.string().trim().min(1).max(500).default(DEFAULT_CONTINUE_PROMPT),
+    /**
+     * Change the default account and the agents already open follow it. Off, they stay on the
+     * account they run on (pinned, so resuming them later keeps them there) and only new agents
+     * use the new default. Codex threads never move either way.
+     */
+    moveAgentsOnDefaultChange: z.boolean().default(true),
     /** New agents start on the account with the most headroom instead of the default. */
     balanceNewAgents: z.boolean().default(false),
     /** When every account of a provider is at its limit, spend a banked reset instead of stopping. */
