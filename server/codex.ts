@@ -21,6 +21,8 @@ const CLIENT_NAME = "codex_cli_rs";
 type Json = Record<string, unknown>;
 
 const MAX_FRAME_BYTES = 1024 * 1024;
+/** Its steps time out one by one, so without this a stuck read could keep its callers waiting ~150 s. */
+const READ_DEADLINE_MS = 60_000;
 
 /** Newline-delimited JSON-RPC with `codex app-server` (no `jsonrpc` field on the wire). */
 class AppServer {
@@ -58,10 +60,13 @@ class AppServer {
     });
   }
 
-  static async open(env: NodeJS.ProcessEnv): Promise<AppServer> {
+  static async open(env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<AppServer> {
     const { command, prefix } = await providerCommand("codex");
+    signal?.throwIfAborted();
     const child = spawn(command, [...prefix, "app-server"], { env, stdio: ["pipe", "pipe", "pipe"] });
     const server = new AppServer(child);
+    // Stops the session wherever it is, even while it is still starting.
+    signal?.addEventListener("abort", () => server.close(), { once: true });
     try {
       await server.request(
         "initialize",
@@ -231,7 +236,7 @@ export class CodexAdapter implements FamilyAdapter {
     const key = home ?? "";
     const cached = this.snapshots.get(key);
     if (cached && (cached.pending || Date.now() - cached.at < (fresh ? 5_000 : 15_000))) return cached.value;
-    const value = this.readSnapshot(home).finally(() => {
+    const value = this.readWithDeadline(home).finally(() => {
       const current = this.snapshots.get(key);
       if (current?.value === value) {
         current.pending = false;
@@ -245,8 +250,24 @@ export class CodexAdapter implements FamilyAdapter {
     return value;
   }
 
-  private async readSnapshot(home: string | null): Promise<Snapshot> {
-    const server = await AppServer.open(spawnEnv(await this.env(home)));
+  /** Everyone waiting shares this read, so when it runs out of time they all get the error and the app server stops. */
+  private readWithDeadline(home: string | null): Promise<Snapshot> {
+    const deadline = new AbortController();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const error = new Error(`Codex did not answer within ${READ_DEADLINE_MS / 1000} s`);
+        deadline.abort(error);
+        reject(error);
+      }, READ_DEADLINE_MS);
+      timer.unref();
+      this.readSnapshot(home, deadline.signal)
+        .then(resolve, reject)
+        .finally(() => clearTimeout(timer));
+    });
+  }
+
+  private async readSnapshot(home: string | null, signal: AbortSignal): Promise<Snapshot> {
+    const server = await AppServer.open(spawnEnv(await this.env(home)), signal);
     try {
       const account = ((await server.request("account/read", {})) ?? {}) as Json;
       const details = account.account as { type?: unknown; email?: unknown; planType?: unknown } | null;

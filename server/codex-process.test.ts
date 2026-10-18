@@ -150,6 +150,30 @@ describe("Codex app-server process handling", () => {
     }
   });
 
+  it("gives up on a read after 60 s and releases every waiter", async () => {
+    vi.useFakeTimers();
+    const hung = childProcess();
+    const next = childProcess();
+    spawn.mockReturnValueOnce(hung).mockReturnValueOnce(next);
+    // Starting takes 59 s, inside its own timeout; then account/read never answers.
+    serve(hung, (request) => {
+      if (request.method === "initialize") setTimeout(() => reply(hung, request.id, {}), 59_000);
+    });
+    healthy(next);
+    const adapter = new CodexAdapter();
+    const errors: string[] = [];
+    void adapter.identity(null).catch((error: Error) => errors.push(error.message));
+    await vi.advanceTimersByTimeAsync(20_000);
+    void adapter.usage(null).catch((error: Error) => errors.push(error.message));
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(errors).toEqual(["Codex did not answer within 60 s", "Codex did not answer within 60 s"]);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(hung.kill).toHaveBeenCalledWith("SIGTERM");
+    // The failure isn't cached, so the next read starts a fresh session.
+    await expect(adapter.identity(null)).resolves.toMatchObject({ email: "Ada@Example.com" });
+    expect(spawn).toHaveBeenCalledTimes(2);
+  });
+
   it("retries with a fresh session after a failed read", async () => {
     const failing = childProcess();
     const next = childProcess();
