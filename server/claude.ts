@@ -296,13 +296,16 @@ class ClaudeLogin extends ProgressEmitter implements LoginHandle {
         resolve({ ok: false, message: friendlyFailure(failure ?? this.stderr.trim()) });
       });
     });
-    this.child.stdout.on("data", (chunk: Buffer) => {
-      this.stdout = (this.stdout + stripAnsi(chunk.toString("utf8"))).slice(-16_384);
+    // Decoding the stream, not each chunk, keeps a character split across two chunks whole.
+    this.child.stdout.setEncoding("utf8");
+    this.child.stderr.setEncoding("utf8");
+    this.child.stdout.on("data", (chunk: string) => {
+      this.stdout = (this.stdout + stripAnsi(chunk)).slice(-16_384);
       const manual = firstUrl(this.stdout, /\/oauth\/authorize/);
       if (manual && manual !== this.progress.codeUrl) this.update({ codeUrl: manual, step: "waiting" });
     });
-    this.child.stderr.on("data", (chunk: Buffer) => {
-      const text = stripAnsi(chunk.toString("utf8"));
+    this.child.stderr.on("data", (chunk: string) => {
+      const text = stripAnsi(chunk);
       this.stderr = (this.stderr + text).slice(-16_384);
       if (/invalid code/i.test(text)) {
         this.update({ message: "That code didn't work. Copy the whole code from the page and paste it again." });

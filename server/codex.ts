@@ -35,9 +35,12 @@ class AppServer {
 
   private constructor(private readonly child: ChildProcessWithoutNullStreams) {
     child.stdin.on("error", () => undefined);
-    child.stdout.on("data", (chunk: Buffer) => this.receive(chunk.toString("utf8")));
-    child.stderr.on("data", (chunk: Buffer) => {
-      this.stderr = (this.stderr + chunk.toString("utf8")).slice(-4_000);
+    // Decoding the stream, not each chunk, keeps a character split across two chunks whole.
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (text: string) => this.receive(text));
+    child.stderr.on("data", (text: string) => {
+      this.stderr = (this.stderr + text).slice(-4_000);
     });
     this.exited = new Promise((resolve) => {
       const finish = (error?: Error) => {

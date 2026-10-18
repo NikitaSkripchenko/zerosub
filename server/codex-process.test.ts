@@ -143,4 +143,21 @@ describe("Codex app-server process handling", () => {
     expect(identity).toMatchObject({ signedIn: true, email: "Ada@Example.com", identity: "chatgpt|acc-1" });
     expect(spawn).toHaveBeenCalledTimes(2);
   });
+
+  it("keeps a character split across two writes whole", async () => {
+    const child = childProcess();
+    spawn.mockReturnValue(child);
+    serve(child, (request) => {
+      if (request.method === "initialize") reply(child, request.id, {});
+      else if (request.method === "account/read") {
+        const account = { account: { type: "chatgpt", email: "zoë@example.com", planType: "plus" } };
+        const frame = Buffer.from(`${JSON.stringify({ id: request.id, result: account })}\n`);
+        const cut = frame.indexOf(Buffer.from("ë")) + 1; // between the two bytes of "ë"
+        child.stdout.write(frame.subarray(0, cut));
+        child.stdout.write(frame.subarray(cut));
+      } else if (request.method === "account/rateLimits/read") reply(child, request.id, LIMITS);
+    });
+    const identity = await new CodexAdapter().identity(null);
+    expect(identity.email).toBe("zoë@example.com");
+  });
 });

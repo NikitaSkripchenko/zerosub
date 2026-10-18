@@ -60,4 +60,16 @@ describe("Claude sign-in process cleanup", () => {
     child.emit("close", 1);
     await expect(login.finished).resolves.toEqual({ ok: false, message: "Sign-in failed: rejected by provider" });
   });
+
+  it("keeps a character split across two writes whole", async () => {
+    const child = childProcess();
+    spawn.mockReturnValue(child);
+    const login = await new ClaudeAdapter().login(null, "browser");
+    const failure = Buffer.from("Login failed: no account for zoë@example.com\n");
+    const cut = failure.indexOf(Buffer.from("ë")) + 1; // between the two bytes of "ë"
+    child.stderr.write(failure.subarray(0, cut));
+    child.stderr.write(failure.subarray(cut));
+    child.emit("close", 1);
+    await expect(login.finished).resolves.toEqual({ ok: false, message: "Sign-in failed: no account for zoë@example.com" });
+  });
 });
