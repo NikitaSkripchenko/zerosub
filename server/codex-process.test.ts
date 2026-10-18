@@ -71,31 +71,53 @@ describe("Codex app-server process handling", () => {
   beforeEach(() => spawn.mockReset());
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
     spawn.mockReset();
   });
 
-  it("fails pending reads when a Codex frame exceeds 1 MiB", async () => {
+  it("an oversized notification doesn't break a read", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const child = childProcess();
     spawn.mockReturnValue(child);
+    const huge = `${JSON.stringify({ method: "codex/event", params: { blob: "x".repeat(1024 * 1024) } })}\n`;
     serve(child, (request) => {
       if (request.method === "initialize") reply(child, request.id, {});
-      else if (request.method === "account/read") child.stdout.write(`${"x".repeat(1024 * 1024 + 1)}\n`);
+      else if (request.method === "account/read") {
+        child.stdout.write(huge);
+        child.stdout.write(huge);
+        reply(child, request.id, ACCOUNT);
+      } else if (request.method === "account/rateLimits/read") reply(child, request.id, LIMITS);
     });
-    await expect(new CodexAdapter().identity(null)).rejects.toThrow("1 MiB frame limit");
+    const identity = await new CodexAdapter().identity(null);
+    expect(identity).toMatchObject({ signedIn: true, email: "Ada@Example.com", identity: "chatgpt|acc-1" });
     expect(spawn).toHaveBeenCalledTimes(1);
-    expect(spawn).toHaveBeenCalledWith("fake-codex", ["app-server"], expect.anything());
-    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 
-  it("fails pending reads when a frame without newline exceeds 1 MiB", async () => {
+  it("a flood with no newline stays bounded", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const child = childProcess();
     spawn.mockReturnValue(child);
+    const held: Request[] = [];
     serve(child, (request) => {
       if (request.method === "initialize") reply(child, request.id, {});
-      else if (request.method === "account/read") child.stdout.write("y".repeat(1024 * 1024 + 1));
+      else if (request.method === "account/read") held.push(request);
+      else if (request.method === "account/rateLimits/read") reply(child, request.id, LIMITS);
     });
-    await expect(new CodexAdapter().usage(null)).rejects.toThrow("1 MiB frame limit");
-    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    const read = new CodexAdapter().identity(null);
+    await vi.waitFor(() => expect(held).toHaveLength(1));
+    const id = held[0]!.id;
+    const quarter = "y".repeat(256 * 1024);
+    for (let i = 0; i < 4; i++) child.stdout.write(quarter);
+    expect(warn).not.toHaveBeenCalled(); // exactly 1 MiB is still allowed
+    child.stdout.write(quarter);
+    expect(warn).toHaveBeenCalledTimes(1); // dropped as soon as it passed the limit
+    // Up to its newline this is still the oversized message, even where it looks like a reply.
+    const wrong = { account: { type: "chatgpt", email: "wrong@example.com", planType: "plus" } };
+    child.stdout.write(`${JSON.stringify({ id, result: wrong })}\n`);
+    reply(child, id, ACCOUNT);
+    await expect(read).resolves.toMatchObject({ email: "Ada@Example.com" });
+    expect(spawn).toHaveBeenCalledTimes(1);
   });
 
   it("shares one in-flight read between identity and usage past the TTL", async () => {

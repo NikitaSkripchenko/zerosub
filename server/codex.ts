@@ -26,6 +26,9 @@ const MAX_FRAME_BYTES = 1024 * 1024;
 class AppServer {
   private nextId = 1;
   private buffer = "";
+  /** Dropping the rest of a message over the limit, up to its newline. */
+  private skipping = false;
+  private warnedOversized = false;
   private stderr = "";
   private closed = false;
   private ending = false;
@@ -119,15 +122,22 @@ class AppServer {
 
   private receive(text: string): void {
     if (this.closed || this.ending) return;
-    this.buffer += text;
+    let rest = text;
+    if (this.skipping) {
+      const end = rest.indexOf("\n");
+      if (end < 0) return;
+      this.skipping = false;
+      rest = rest.slice(end + 1);
+    }
+    this.buffer += rest;
     let newline = this.buffer.indexOf("\n");
     while (newline >= 0) {
       const line = this.buffer.slice(0, newline);
       this.buffer = this.buffer.slice(newline + 1);
       newline = this.buffer.indexOf("\n");
       if (Buffer.byteLength(line, "utf8") > MAX_FRAME_BYTES) {
-        this.failOversizedFrame();
-        return;
+        this.skipOversized();
+        continue;
       }
       if (!line.trim()) continue;
       let message: Json;
@@ -138,15 +148,19 @@ class AppServer {
       }
       this.dispatch(message);
     }
-    if (Buffer.byteLength(this.buffer, "utf8") > MAX_FRAME_BYTES) this.failOversizedFrame();
+    // A message still arriving can't be kept past the limit either: drop it and skip to its newline.
+    if (Buffer.byteLength(this.buffer, "utf8") > MAX_FRAME_BYTES) {
+      this.buffer = "";
+      this.skipping = true;
+      this.skipOversized();
+    }
   }
 
-  private failOversizedFrame(): void {
-    const error = new Error("Codex response exceeded the 1 MiB frame limit");
-    for (const request of this.pending.values()) request.reject(error);
-    this.pending.clear();
-    this.buffer = "";
-    this.close();
+  /** Only that message is lost; the session and every other request carry on. */
+  private skipOversized(): void {
+    if (this.warnedOversized) return;
+    this.warnedOversized = true;
+    console.warn("[ZeroSub] skipped a Codex message over the 1 MiB limit");
   }
 
   private dispatch(message: Json): void {
