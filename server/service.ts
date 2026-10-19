@@ -1304,12 +1304,17 @@ export class Service {
     if (!account) throw new Error("That account no longer exists.");
     if (!account.signedIn) throw new Error(`${account.label} is signed out. Sign it in first.`);
     if (account.disabled) throw new Error(`${account.label} is disabled. Enable it before making it the default.`);
-    if (!this.adapters[account.family].portable) await this.pinThreads(paseo, account.family, "threads");
-    // The new default is for what comes next: agents already open stay on the account they run on.
-    else if (!this.prefs.moveAgentsOnDefaultChange) await this.pinThreads(paseo, account.family, "open-agents");
+    const portable = this.adapters[account.family].portable;
+    if (!portable) await this.pinThreads(paseo, account.family);
     await this.store.update((draft) => {
       draft.defaults[account.family] = account.id;
     });
+    if (portable && !this.prefs.moveAgentsOnDefaultChange) {
+      // The new default is for what comes next: open agents stay on the account they run on.
+      const kept = await this.keepOpenAgents(paseo, account.family, account.id);
+      console.log(`[ZeroSub] ${account.label} is the default now; ${kept} open agent(s) stay on their account`);
+      return emptySummary();
+    }
     // Conversations that can't move (Codex threads) are pinned, so this only moves portable ones.
     return this.reconcile(paseo, "default");
   }
@@ -1349,39 +1354,52 @@ export class Service {
   }
 
   /**
-   * Pins existing agents to the account they run on now, before the default changes. Agents that
-   * haven't opened a session since ZeroSub was installed have no pin yet.
-   *
-   * `threads`: every agent of a non-portable provider, archived ones included, because its
-   * conversation can never change accounts. `open-agents`: the agents open right now on a portable
-   * provider, when the user would rather a new default didn't move work already under way; the pin
-   * reads as a plugin decision, so the pill still offers "Follow default" to undo it.
+   * Pins every existing agent of a non-portable provider to the account it runs on now, before the
+   * default changes. Agents that haven't opened a session since ZeroSub was installed have no pin yet.
    */
-  private async pinThreads(paseo: PaseoApi, family: Family, mode: "threads" | "open-agents"): Promise<void> {
-    const threads = mode === "threads";
+  private async pinThreads(paseo: PaseoApi, family: Family): Promise<void> {
     const families = await this.families.resolve(paseo);
-    const { agents } = await listAgents(paseo, threads);
+    const { agents } = await listAgents(paseo, true);
     const state = await this.store.read();
     const current = defaultAccount(state, family);
-    const unpinned = agents.filter(
-      (agent) =>
-        families[agent.provider] === family &&
-        !state.bindings[agent.id] &&
-        (threads || (!agent.archived && isLive(agent.status))),
-    );
+    const unpinned = agents.filter((agent) => families[agent.provider] === family && !state.bindings[agent.id]);
     if (!current || unpinned.length === 0) return;
     const at = new Date().toISOString();
     await this.store.update((draft) => {
       for (const agent of unpinned) {
         if (draft.bindings[agent.id]) continue;
         // A thread lives where its session ran: the CLI login when ZeroSub never routed it.
-        draft.bindings[agent.id] = {
-          accountId: this.runningOn(draft, agent.id, family) ?? current.id,
-          source: threads ? "thread" : "auto",
-          at,
-        };
+        draft.bindings[agent.id] = { accountId: this.runningOn(draft, agent.id, family) ?? current.id, source: "thread", at };
       }
     });
+  }
+
+  /**
+   * Pins each open agent that follows the default to the account it runs on, so the new default
+   * doesn't move it, now or when it next opens. Runs once the new default is in place, so an agent
+   * that opened under the old one just before is kept too. Agents already on the new default keep
+   * following it. Returns how many it pinned.
+   */
+  private async keepOpenAgents(paseo: PaseoApi, family: Family, newDefault: string): Promise<number> {
+    const families = await this.families.resolve(paseo);
+    const open = (await listAgents(paseo, false)).agents.filter(
+      (agent) => families[agent.provider] === family && !agent.archived && isLive(agent.status),
+    );
+    let kept = 0;
+    if (open.length === 0) return kept;
+    const at = new Date().toISOString();
+    await this.store.update((draft) => {
+      for (const agent of open) {
+        // An agent with an account of its own never followed the default.
+        if (findAccount(draft, draft.bindings[agent.id]?.accountId)?.family === family) continue;
+        const current = findAccount(draft, this.runningOn(draft, agent.id, family));
+        if (!current || current.family !== family || current.id === newDefault) continue;
+        // "auto", like a limit switch, so the account button still offers "Follow default".
+        draft.bindings[agent.id] = { accountId: current.id, source: "auto", at };
+        kept += 1;
+      }
+    });
+    return kept;
   }
 
   async clearLimit(accountId: string): Promise<void> {
