@@ -18,7 +18,8 @@ export const preferences = defineSettings({
     /**
      * When the default account changes, open agents that follow it move to the new one. Off, each
      * stays pinned to the account it runs on (so it stays there when it next opens too), and the new
-     * default is for new agents and ones opened later. Codex threads never move either way.
+     * default is for new agents and ones that aren't open at the time. Codex threads never move
+     * either way.
      */
     moveAgentsOnDefaultChange: z.boolean().default(true),
     /** New agents start on the account with the most headroom instead of the default. */

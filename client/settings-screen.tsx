@@ -44,7 +44,7 @@ export function PreferencesScreen({ theme, host, onOpenAccounts }: PluginSurface
           />
           <SettingsSwitch
             label="Move open agents when the default changes"
-            hint="Off, agents already open stay on their account and only new ones use the new default."
+            hint="Off: open agents stay on the account they're using, even after they reopen. New agents, and agents that aren't open at the time, use the new default."
             value={settings.values.moveAgentsOnDefaultChange}
             disabled={settings.saving}
             onValueChange={(moveAgentsOnDefaultChange) => save({ moveAgentsOnDefaultChange })}
