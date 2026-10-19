@@ -7,7 +7,7 @@ import type { FamilyResolver } from "./families";
 import { detectClaudeLimit } from "./limits";
 import type { Reopener } from "./reopen";
 import { Service } from "./service";
-import { MAIN_ACCOUNT_ID, StateStore, type StoredState } from "./state";
+import { MAIN_ACCOUNT_ID, StateStore, type StoredAccount, type StoredState } from "./state";
 import { preferences } from "../shared/preferences";
 
 const MAIN = MAIN_ACCOUNT_ID.claude;
@@ -506,7 +506,6 @@ describe("changing the default account", () => {
           chosen: session(MAIN),
           closed: session(WORK),
           there: session(HELLO),
-          orphaned: session("claude-removed"),
         },
       },
       [
@@ -516,7 +515,6 @@ describe("changing the default account", () => {
         { id: "chosen", status: "idle" },
         { id: "closed", status: "closed" },
         { id: "there", status: "idle" }, // already on the new default
-        { id: "orphaned", status: "idle" }, // its account was removed, so there's none to keep it on
         { id: "chatgpt", status: "idle", provider: "codex" }, // a Claude default isn't its concern
       ],
     );
@@ -532,7 +530,6 @@ describe("changing the default account", () => {
     expect(bindings.chosen).toMatchObject({ accountId: MAIN, source: "user" });
     expect(bindings.closed).toBeUndefined();
     expect(bindings.there).toBeUndefined();
-    expect(bindings.orphaned).toBeUndefined();
     expect(bindings.chatgpt).toBeUndefined();
 
     // Kept agents read as pinned, so their account button offers "Follow default"; the rest follow it.
@@ -540,6 +537,41 @@ describe("changing the default account", () => {
     expect(routes.get("idle")).toMatchObject({ accountId: WORK, pinned: true, pendingAccountId: null });
     expect(routes.get("closed")).toMatchObject({ accountId: HELLO, pinned: false });
     expect(routes.get("there")).toMatchObject({ accountId: HELLO, pinned: false });
+  });
+
+  it("moves an agent whose account it can't stay on, as it would with the switch on", async () => {
+    const cases: Array<[string, Partial<StoredAccount> | null]> = [
+      ["at its limit", { limitedUntil: inFuture(), limitKind: "window" }],
+      ["signed out", { signedIn: false }],
+      ["disabled", { disabled: true }],
+      ["removed", null],
+    ];
+    for (const [why, work] of cases) {
+      const { service, store, paseo, reopened } = await setUpAgents(
+        {
+          accounts: [
+            account(MAIN, "marketing", "main"),
+            ...(work ? [{ ...account(WORK, "work", "managed"), ...work }] : []),
+            account(HELLO, "hello", "managed"),
+          ] as never,
+          defaults: { claude: MAIN, codex: null },
+          bindings: {},
+          sessions: { stuck: session(WORK), fine: session(MAIN) },
+        },
+        [
+          { id: "stuck", status: "idle" },
+          { id: "fine", status: "idle" },
+        ],
+      );
+      // Without automatic switching, changing the default is how a stuck agent gets out.
+      service.setPreferences({ ...KEEP, autoSwitch: false });
+      expect(await service.setDefault(paseo, HELLO), why).toEqual({ ...NOTHING_MOVED, reopened: ["stuck"] });
+      expect(reopened, why).toEqual(["stuck"]);
+      const state = await store.read();
+      expect(state.sessions.stuck?.accountId, why).toBe(HELLO);
+      expect(state.bindings.stuck, why).toBeUndefined();
+      expect(state.bindings.fine, why).toMatchObject({ accountId: MAIN, source: "auto" });
+    }
   });
 
   it("changes nothing when the account is already the default", async () => {

@@ -40,7 +40,7 @@ import { homesDir } from "./paths";
 import { Reopener } from "./reopen";
 import { SwitchGuard } from "./switch-guard";
 import { loadReadings, mergeUsage, saveReadings, showLimit } from "./usage";
-import { chooseAccount, isLimited, mostAvailable } from "./routing";
+import { chooseAccount, isLimited, isUsable, mostAvailable } from "./routing";
 import {
   MAIN_ACCOUNT_ID,
   StateStore,
@@ -1329,9 +1329,10 @@ export class Service {
     });
     if (portable && !this.prefs.moveAgentsOnDefaultChange) {
       // The new default is for what comes next: open agents stay on the account they run on.
-      const kept = await this.keepOpenAgents(paseo, account.family, account.id);
+      const { kept, moving } = await this.keepOpenAgents(paseo, account.family, account.id);
       console.log(`[ZeroSub] ${account.label} is the default now; ${kept} open agent(s) stay on their account`);
-      return emptySummary();
+      // Agents that can't stay where they are move as they would with the switch on; nothing else does.
+      return moving.length > 0 ? this.reconcile(paseo, "default", moving) : emptySummary();
     }
     // Conversations that can't move (Codex threads) are pinned, so this only moves portable ones.
     return this.reconcile(paseo, "default");
@@ -1396,9 +1397,14 @@ export class Service {
    * Pins each open agent that follows the default to the account it runs on, so the new default
    * doesn't move it, now or when it next opens. Runs once the new default is in place, so an agent
    * that opened under the old one just before is kept too, even if its session was still being
-   * routed. Agents already on the new default keep following it. Returns how many it pinned.
+   * routed. Agents already on the new default keep following it. An account that's gone, signed
+   * out, disabled or at its limit is no place to keep work, so those agents come back in `moving`.
    */
-  private async keepOpenAgents(paseo: PaseoApi, family: Family, newDefault: string): Promise<number> {
+  private async keepOpenAgents(
+    paseo: PaseoApi,
+    family: Family,
+    newDefault: string,
+  ): Promise<{ kept: number; moving: string[] }> {
     // A session being routed may have gone by the old default: let it record where it opens first.
     if (this.routing.size > 0) await withTimeout(Promise.allSettled(this.routing.keys()), ROUTING_WAIT_MS);
     const families = await this.families.resolve(paseo);
@@ -1406,8 +1412,10 @@ export class Service {
       (agent) => families[agent.provider] === family && !agent.archived && isLive(agent.status),
     );
     let kept = 0;
-    if (open.length === 0) return kept;
-    const at = new Date().toISOString();
+    const moving: string[] = [];
+    if (open.length === 0) return { kept, moving };
+    const now = Date.now();
+    const at = new Date(now).toISOString();
     await this.store.update((draft) => {
       // Where these open isn't recorded yet, and a session routed now goes by the new default.
       const routing = new Set(this.routing.values());
@@ -1418,13 +1426,15 @@ export class Service {
         // Still starting, and not routed yet: it will be, by the new default.
         if (agent.status === "initializing" && !draft.sessions[agent.id]) continue;
         const current = findAccount(draft, this.runningOn(draft, agent.id, family));
-        if (!current || current.family !== family || current.id === newDefault) continue;
-        // "auto", like a limit switch, so the account button still offers "Follow default".
-        draft.bindings[agent.id] = { accountId: current.id, source: "auto", at };
-        kept += 1;
+        if (!current || current.family !== family || !isUsable(current, now)) moving.push(agent.id);
+        else if (current.id !== newDefault) {
+          // "auto", like a limit switch, so the account button still offers "Follow default".
+          draft.bindings[agent.id] = { accountId: current.id, source: "auto", at };
+          kept += 1;
+        }
       }
     });
-    return kept;
+    return { kept, moving };
   }
 
   async clearLimit(accountId: string): Promise<void> {

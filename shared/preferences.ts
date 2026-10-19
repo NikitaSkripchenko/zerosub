@@ -17,9 +17,9 @@ export const preferences = defineSettings({
     continuePrompt: z.string().trim().min(1).max(500).default(DEFAULT_CONTINUE_PROMPT),
     /**
      * When the default account changes, open agents that follow it move to the new one. Off, each
-     * stays pinned to the account it runs on (so it stays there when it next opens too), and the new
-     * default is for new agents and ones that aren't open at the time. Codex threads never move
-     * either way.
+     * stays pinned to the account it runs on (so it stays there when it next opens too), unless that
+     * account can't be used right now, and the new default is for new agents and ones that aren't
+     * open at the time. Codex threads never move either way.
      */
     moveAgentsOnDefaultChange: z.boolean().default(true),
     /** New agents start on the account with the most headroom instead of the default. */
