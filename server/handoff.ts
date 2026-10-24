@@ -9,6 +9,10 @@ export const CONTINUED_FROM_LABEL = "zerosub.continued-from";
 
 const MAX_TRANSCRIPT = 40_000;
 const MAX_FIRST_MESSAGE = 6_000;
+const MAX_EARLIER_HANDOFF = 6_000;
+
+const OPEN = "<previous-session>";
+const CLOSE = "</previous-session>";
 
 function clip(text: string, max: number): string {
   const trimmed = text.trim();
@@ -24,6 +28,27 @@ export function keepEnds(text: string, max: number, marker = "[… omitted …]"
   const room = Math.max(0, max - marker.length - 4);
   const head = Math.floor(room / 3);
   return `${text.slice(0, head).trimEnd()}\n\n${marker}\n\n${text.slice(text.length - (room - head)).trimStart()}`;
+}
+
+/** Tags become plain words, so a quote can't open or close the block around it. */
+function neutralise(text: string): string {
+  return text.replaceAll(OPEN, "[earlier session:").replaceAll(CLOSE, "]");
+}
+
+/**
+ * A continuation's first message quotes the session before it. Quoting that again would nest every
+ * earlier hand-off inside the next, so keep only the start of the earlier session (its original
+ * request) and its end (where it left off), and say what was cut. Based on liloli's version in #14.
+ */
+export function shortenEarlierHandOff(text: string): string {
+  const open = text.indexOf(OPEN);
+  if (open < 0) return text;
+  const close = text.lastIndexOf(CLOSE);
+  const end = close > open ? close : text.length;
+  const inner = neutralise(shortenEarlierHandOff(text.slice(open + OPEN.length, end))).trim();
+  const kept = keepEnds(inner, MAX_EARLIER_HANDOFF, "[… middle of that earlier session omitted …]");
+  const after = close > open ? text.slice(close + CLOSE.length) : "";
+  return `${neutralise(text.slice(0, open))}${OPEN}\n${kept}\n${CLOSE}${neutralise(after)}`;
 }
 
 function describeTool(item: Extract<AgentTimelineItem, { type: "tool_call" }>): string {
@@ -59,10 +84,13 @@ export function buildTranscript(timeline: readonly AgentTimelineItem[], max = MA
   let todos: string | null = null;
   for (const item of timeline) {
     switch (item.type) {
-      case "user_message":
-        if (firstUser === null) firstUser = clip(item.text, MAX_FIRST_MESSAGE);
-        lines.push(`User: ${item.text.trim()}`);
+      case "user_message": {
+        // Clipping below can't then split a quoted pair: the prompt's own tags are the only ones.
+        const text = neutralise(shortenEarlierHandOff(item.text));
+        if (firstUser === null) firstUser = clip(text, MAX_FIRST_MESSAGE);
+        lines.push(`User: ${text.trim()}`);
         break;
+      }
       case "assistant_message":
         if (item.text.trim()) lines.push(`Assistant: ${item.text.trim()}`);
         break;
@@ -92,9 +120,9 @@ export function continuationPrompt(transcript: string, why: string, previous = "
     `This task is continuing from an earlier ${previous} session that stopped because ${why}.`,
     "The working directory already contains every change that session made. Here is its conversation, oldest first:",
     "",
-    "<previous-session>",
+    OPEN,
     transcript,
-    "</previous-session>",
+    CLOSE,
     "",
     "Pick up exactly where it left off. Check the current state of the files before changing anything, and don't redo finished work.",
   ].join("\n");
