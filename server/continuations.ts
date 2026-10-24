@@ -19,8 +19,10 @@ const MAX_INSTRUCTIONS = 60_000;
 const MAX_ORIGIN = 6_000;
 const OMITTED = "[… part of this message omitted to fit this update …]";
 
+/** The same checkout. Paseo starts a workspace's new agents in its directory, not the source's subfolder. */
 function samePlace(left: Agent, right: Agent): boolean {
-  return left.provider === right.provider && left.cwd === right.cwd && left.workspaceId === right.workspaceId;
+  if (left.provider !== right.provider || left.workspaceId !== right.workspaceId) return false;
+  return Boolean(left.workspaceId) || left.cwd === right.cwd;
 }
 
 function ready(agent: Agent): boolean {

@@ -138,6 +138,17 @@ describe("Codex account continuations", () => {
     expect((await t.store.read()).bindings[b.agentId]?.source).toBe("user");
   });
 
+  it("reuses tabs for an agent in a workspace subfolder", async () => {
+    const t = await setup();
+    t.agents.get("root")!.cwd = join(dir, "packages", "app");
+    // As in the SDK, a workspace's new agent starts in the workspace's own directory.
+    const b = await t.switchTo("root", "b");
+    expect(t.agents.get(b.agentId)!.cwd).toBe(dir);
+    expect((await t.switchTo(b.agentId, "a")).agentId).toBe("root");
+    expect((await t.switchTo("root", "b")).agentId).toBe(b.agentId);
+    expect(t.created).toHaveLength(1);
+  });
+
   it("keeps an intermediate account's instructions across a three-account round trip", async () => {
     const t = await setup();
     const b = await t.switchTo("root", "b");
