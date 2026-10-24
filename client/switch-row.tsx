@@ -80,9 +80,7 @@ export function SwitchRowView({ item, theme }: PluginTimelineItemProps<SwitchRow
     ? "GitFork"
     : row.reason === "exhausted" || row.outcome === "stayed"
       ? "CircleAlert"
-      : row.outcome === "continued"
-        ? "CopyPlus"
-        : row.outcome === "reset"
+      : row.outcome === "reset"
           ? "TimerReset"
           : "ArrowRightLeft";
   return (

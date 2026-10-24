@@ -175,7 +175,7 @@ function buttonFor(
     kind: "item",
     id: `account-${index}`,
     title: account.id === current.id || movable ? menuTitle(account) : `Continue on ${account.label}`,
-    icon: account.id === current.id ? "CircleCheck" : movable ? "Circle" : "CopyPlus",
+    icon: account.id === current.id ? "CircleCheck" : movable ? "Circle" : "ArrowRightLeft",
     disabled: account.status === "signed_out" || account.status === "disabled" || account.id === current.id,
     behavior: { kind: "action", onPress: choose(account.id) },
   }));
