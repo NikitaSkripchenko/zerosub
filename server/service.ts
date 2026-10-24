@@ -31,6 +31,7 @@ import {
   type UsageRead,
 } from "./adapter";
 import { FamilyResolver } from "./families";
+import { CodexContinuations } from "./continuations";
 import { CONTINUED_FROM_LABEL, continueInNewAgent, type Continuation } from "./handoff";
 import { removeHome } from "./homes";
 import { Mutex } from "./json-file";
@@ -48,6 +49,7 @@ import {
   defaultAccount,
   findAccount,
   mainAccount,
+  type ContinuationChain,
   type StoredAccount,
   type StoredState,
 } from "./state";
@@ -130,6 +132,7 @@ function emptySummary(): ReopenSummary {
 }
 
 export class Service {
+  private readonly continuations: CodexContinuations;
   private paseo: PaseoApi | null = null;
   private prefs: Preferences = DEFAULT_PREFERENCES;
   private readonly usage = new Map<string, Usage>();
@@ -148,7 +151,7 @@ export class Service {
   /** One failover at a time per exhausted account. */
   private readonly failoverLocks = new Map<string, Mutex>();
   private readonly switchGuard = new SwitchGuard();
-  /** When the guard last told an agent's timeline it stopped switching, so it says so once. */
+  /** When ZeroSub last told an agent's timeline why it didn't switch, by agent and notice, so it says so once. */
   private readonly guardNoticeAt = new Map<string, number>();
   /** When each account's agents last started or ended a turn, to read busy accounts often. */
   private readonly activeAt = new Map<string, number>();
@@ -169,7 +172,9 @@ export class Service {
     private readonly store = new StateStore(),
     private readonly families = new FamilyResolver(),
     private readonly reopener = new Reopener(),
-  ) {}
+  ) {
+    this.continuations = new CodexContinuations(store);
+  }
 
   setPreferences(prefs: Preferences): void {
     this.prefs = prefs;
@@ -274,10 +279,18 @@ export class Service {
     const old = (at: string) => now - (Date.parse(at) || 0) > PRUNE_MS;
     const staleSessions = Object.entries(state.sessions).filter(([id, session]) => !known.has(id) && old(session.openedAt));
     const staleBindings = Object.entries(state.bindings).filter(([id, binding]) => !known.has(id) && old(binding.at));
-    if (staleSessions.length === 0 && staleBindings.length === 0) return;
+    const active = new Set(agents.filter((agent) => !agent.archived).map((agent) => agent.id));
+    // A hand-off that may have sent its prompt stays on record while its tab could come back. A
+    // failed creation sent nothing, so it doesn't keep the task's record alive.
+    const unsettled = (pending: ContinuationChain["pending"]) => pending?.stage === "sending" && known.has(pending.agentId);
+    const staleChains = Object.entries(state.continuations).filter(([, chain]) =>
+      !unsettled(chain.pending) && Object.keys(chain.members).every((id) => !active.has(id) && !this.switching.has(id)),
+    );
+    if (staleSessions.length === 0 && staleBindings.length === 0 && staleChains.length === 0) return;
     await this.store.update((draft) => {
       for (const [id] of staleSessions) delete draft.sessions[id];
       for (const [id] of staleBindings) delete draft.bindings[id];
+      for (const [id] of staleChains) delete draft.continuations[id];
     });
   }
 
@@ -438,6 +451,7 @@ export class Service {
     this.deferred.delete(agentId);
     this.switchGuard.forget(agentId);
     this.guardNoticeAt.delete(agentId);
+    this.guardNoticeAt.delete(`${agentId}:elsewhere`);
     if (!(await this.store.read()).sessions[agentId]) return;
     await this.store.update((draft) => {
       delete draft.sessions[agentId];
@@ -479,7 +493,18 @@ export class Service {
     timeline: readonly AgentTimelineItem[],
     problem: Problem,
   ): Promise<void> {
-    if (this.switching.has(agentId)) return;
+    if (this.switching.has(agentId)) {
+      // A manual Codex handoff can race the old thread's limit event. Its account is immutable:
+      // remember the limit even though the ongoing handoff owns continuation dispatch.
+      if (!this.adapters[family].portable && problem.kind === "limit") {
+        const accountId = this.runningOn(await this.store.read(), agentId, family);
+        if (accountId && !this.recentlyRedeemed(accountId)) {
+          const hit = problem.hit;
+          await this.markLimited(accountId, hit.resetsAt ?? new Date(Date.now() + (hit.kind === "budget" ? BUDGET_LIMIT_MS : WINDOW_LIMIT_MS)).toISOString(), hit.kind);
+        }
+      }
+      return;
+    }
     this.switching.add(agentId);
     let exhausted: string | null = null;
     try {
@@ -508,9 +533,21 @@ export class Service {
   ): Promise<void> {
     const adapter = this.adapters[family];
     const now = Date.now();
+    // A parked Codex tab stays stopped: its task carries on in another tab. A failed lookup must not
+    // stop the limit from being recorded below.
+    const elsewhere = adapter.portable
+      ? null
+      : await this.continuations.continuesElsewhere(paseo, agentId).catch((error: unknown) => {
+          log(`could not find where ${agentId}'s task continues`, error);
+          return null;
+        });
     if (problem.kind === "limit" && problem.hit.kind === "window" && this.recentlyRedeemed(account.id)) {
       // This turn hit the limit just before a reset refilled it (another agent's failover or the
       // user spent one moments ago). The account has room again: carry on instead of switching.
+      if (elsewhere) {
+        await this.noteElsewhere(paseo, agentId, account, "limit", null, elsewhere, "resume");
+        return;
+      }
       console.log(`[ZeroSub] ${account.label} was just reset; ${agentId} carries on where it is`);
       if (this.prefs.autoContinue && this.switchGuard.allows(agentId, now)) {
         this.switchGuard.note(agentId, now);
@@ -544,6 +581,10 @@ export class Service {
     }
 
     if (!this.prefs.autoSwitch) return;
+    if (elsewhere) {
+      await this.noteElsewhere(paseo, agentId, account, problem.kind, resetsAt, elsewhere, "switch");
+      return;
+    }
     const latest = await this.store.read();
     if (this.runningOn(latest, agentId, family) !== account.id) return; // Already moved.
     const base = {
@@ -560,8 +601,7 @@ export class Service {
     if (!this.switchGuard.allows(agentId, now)) {
       console.warn(`[ZeroSub] not switching ${agentId} again: it changed accounts ${this.switchGuard.limit} times in 10 minutes`);
       // Say so once, so the user knows to pick an account rather than wait.
-      if (now - (this.guardNoticeAt.get(agentId) ?? 0) > this.switchGuard.windowMs) {
-        this.guardNoticeAt.set(agentId, now);
+      if (this.noticeDue(agentId, now)) {
         await this.appendRow(paseo, agentId, {
           ...base,
           to: account.label,
@@ -695,9 +735,44 @@ export class Service {
         to: next.label,
         reason,
         outcome: "stayed",
-        detail: `Couldn't start a new agent on ${next.label}: ${describe(error)}`,
+        detail: `Couldn't continue on ${next.label}: ${describe(error)}`,
       });
     }
+  }
+
+  /** True once per guard window for each agent and notice, so repeated skips don't flood its timeline. */
+  private noticeDue(key: string, now: number): boolean {
+    if (now - (this.guardNoticeAt.get(key) ?? 0) <= this.switchGuard.windowMs) return false;
+    this.guardNoticeAt.set(key, now);
+    return true;
+  }
+
+  /** Says why ZeroSub left a parked Codex tab alone, instead of silently doing nothing. */
+  private async noteElsewhere(
+    paseo: PaseoApi,
+    agentId: string,
+    account: StoredAccount,
+    reason: "limit" | "signed_out",
+    resetsAt: string | null,
+    elsewhere: Continuation,
+    skipped: "switch" | "resume",
+  ): Promise<void> {
+    console.log(`[ZeroSub] not ${skipped === "switch" ? "switching" : "resuming"} ${agentId} automatically: its task continues in ${elsewhere.agentId}`);
+    const now = Date.now();
+    if (!this.noticeDue(`${agentId}:elsewhere`, now)) return;
+    await this.appendRow(paseo, agentId, {
+      family: account.family,
+      from: account.label,
+      to: account.label,
+      reason,
+      resetsAt,
+      continued: false,
+      continuedIn: null,
+      toFamily: null,
+      outcome: "stayed",
+      detail: `This task continues in “${elsewhere.title}”, so ZeroSub didn't ${skipped} this tab automatically. Carry on there, or pick an account from the account button to continue from here.`,
+      at: new Date(now).toISOString(),
+    });
   }
 
   private async markLimited(accountId: string, until: string, kind: LimitKind): Promise<void> {
@@ -784,6 +859,11 @@ export class Service {
     if (this.runningOn(await this.store.read(), agentId, account.family) !== account.id) return false;
     // Only resume an agent that this limit actually stopped.
     if (!(await this.lastTurnHitLimit(paseo, agentId, account.family))) return false;
+    const elsewhere = this.adapters[account.family].portable ? null : await this.continuations.continuesElsewhere(paseo, agentId);
+    if (elsewhere) {
+      await this.noteElsewhere(paseo, agentId, account, "limit", null, elsewhere, "resume");
+      return false;
+    }
     const at = new Date().toISOString();
     await this.appendRow(paseo, agentId, {
       family: account.family,
@@ -959,6 +1039,21 @@ export class Service {
 
   /** "Continue on …" from an agent's account button: the same fork, asked for by the user. */
   async forkAgent(paseo: PaseoApi, agentId: string): Promise<Continuation> {
+    return this.withSwitch(agentId, () => this.forkAgentNow(paseo, agentId));
+  }
+
+  /** Manual continuations share the automatic failover guard, including cross-provider forks. */
+  private async withSwitch<T>(agentId: string, action: () => Promise<T>): Promise<T> {
+    if (this.switching.has(agentId)) throw new Error("This agent is already switching accounts. Wait for its handoff to finish.");
+    this.switching.add(agentId);
+    try {
+      return await action();
+    } finally {
+      this.switching.delete(agentId);
+    }
+  }
+
+  private async forkAgentNow(paseo: PaseoApi, agentId: string): Promise<Continuation> {
     this.attach(paseo);
     const info = await agentInfo(paseo, agentId);
     if (!info || info.archived) throw new Error("That agent is no longer available.");
@@ -994,6 +1089,7 @@ export class Service {
     timeline: readonly AgentTimelineItem[] | undefined,
     source: "auto" | "user",
   ): Promise<Continuation> {
+    if (target.family === "codex") return this.continuations.continue(paseo, agentId, target, why, source);
     return continueInNewAgent({
       paseo,
       sourceAgentId: agentId,
@@ -1469,14 +1565,14 @@ export class Service {
         const binding = state.bindings[agentId];
         const current = binding?.source === "thread" ? binding.accountId : this.runningOn(state, agentId, family);
         if (current === target.id) return emptySummary();
-        const continuation = await this.continueElsewhere(
+        const continuation = await this.withSwitch(agentId, () => this.continueElsewhere(
           paseo,
           agentId,
           target,
           `you moved the work to your ChatGPT account "${target.label}"`,
           undefined,
           "user",
-        );
+        ));
         await this.appendRow(paseo, agentId, {
           family,
           from: findAccount(state, current)?.label ?? null,
