@@ -454,12 +454,18 @@ export class Service {
    * tail of the agent's timeline is paged here and read as the turn. A hook that did send the turn
    * (Paseo 0.12) is used as is; a turn that never started (`turnId === null`) has nothing to read, as
    * `notices()` in limits.ts ignores its timeline anyway. If the page can't be read the event stands.
+   *
+   * The page can reach back into earlier turns, and a later turn may have started by the time it's
+   * read, so only the rows Paseo tagged with this turn's id count: a turn Claude starts on its own
+   * has no message of its own to stop at, and must not find the last turn's limit again. Paseo's
+   * `[System Error]` row carries no turn id, but it repeats the failure the hook still sends.
    */
   private async turnWithTimeline(paseo: PluginHookContext["paseo"], event: TurnEnded): Promise<TurnEnded> {
-    if (event.turnId === null || event.timeline.length > 0) return event;
+    const { turnId } = event;
+    if (turnId === null || event.timeline.length > 0) return event;
     try {
       const page = await paseo.agents.ref(event.agent.id).timeline.refetch({ direction: "tail", limit: 40 });
-      return { ...event, timeline: page.entries.map((entry) => entry.item) };
+      return { ...event, timeline: page.entries.filter((entry) => entry.turnId === turnId).map((entry) => entry.item) };
     } catch (error) {
       log(`could not read the last turn of ${event.agent.id}`, error);
       return event;

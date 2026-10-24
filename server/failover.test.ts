@@ -55,8 +55,16 @@ function claudeAdapter(hit: () => LimitHit): FamilyAdapter {
   } as unknown as FamilyAdapter;
 }
 
+/** A row of the agent's timeline as Paseo pages it: the item, and the turn Paseo tagged it with. */
+type Row = { item: AgentTimelineItem; turnId?: string };
+
+/** The rows Paseo tags with `turnId` while that turn runs. */
+function inTurn(turnId: string, ...items: AgentTimelineItem[]): Row[] {
+  return items.map((item) => ({ item, turnId }));
+}
+
 /** `recent` is what Paseo hands back when the plugin pages the agent's timeline from its tail. */
-function fakePaseo(recent: readonly AgentTimelineItem[] = []) {
+function fakePaseo(recent: readonly Row[] = []) {
   const sent: string[] = [];
   const notes: Array<{ from: string | null; to: string; outcome: string; detail: string | null }> = [];
   const refetches: Array<{ direction?: string; limit?: number }> = [];
@@ -73,7 +81,7 @@ function fakePaseo(recent: readonly AgentTimelineItem[] = []) {
             void notes.push(item.data),
           refetch: async (options: { direction?: string; limit?: number } = {}) => {
             refetches.push(options);
-            return { entries: recent.map((item) => ({ item })) };
+            return { entries: recent };
           },
         },
       }),
@@ -88,7 +96,7 @@ interface SetUpOptions {
   /** Reads turns with a real detector instead of taking every failed turn for a limit. */
   detectLimit?: FamilyAdapter["detectLimit"];
   /** The tail of the agent's timeline as Paseo returns it when asked. */
-  recent?: readonly AgentTimelineItem[];
+  recent?: readonly Row[];
 }
 
 async function setUp(state: Partial<StoredState>, hit: () => LimitHit, options: SetUpOptions = {}) {
@@ -242,10 +250,7 @@ describe("failover", () => {
     const agent = { id: AGENT, provider: "claude" };
 
     it("reads the finished turn from Paseo and still switches on a limit", async () => {
-      const recent: AgentTimelineItem[] = [
-        { type: "user_message", text: "fix the bug" },
-        { type: "assistant_message", text: notice },
-      ];
+      const recent = inTurn("t1", { type: "user_message", text: "fix the bug" }, { type: "assistant_message", text: notice });
       const { service, store, reopened, notes, refetches, paseo } = await setUp(twoAccounts(), unused, { detectLimit: detectClaudeLimit, recent });
       await service.onTurnEnded({ agent, turnId: "t1", outcome: { kind: "completed" }, timeline: [] } as never, { paseo } as never);
       expect(refetches).toHaveLength(1);
@@ -258,7 +263,7 @@ describe("failover", () => {
 
     it("trusts a timeline the hook did send instead of reading it again", async () => {
       // Paseo 0.12 still sends the turn; a second read would see older rows and could blame the account twice.
-      const recent: AgentTimelineItem[] = [{ type: "assistant_message", text: notice }];
+      const recent = inTurn("t1", { type: "assistant_message", text: notice });
       const { service, store, refetches, paseo } = await setUp(twoAccounts(), unused, { detectLimit: detectClaudeLimit, recent });
       const sent: AgentTimelineItem[] = [
         { type: "user_message", text: "fix the bug" },
@@ -270,13 +275,47 @@ describe("failover", () => {
     });
 
     it("leaves Paseo alone for turns that never started or were canceled", async () => {
-      const recent: AgentTimelineItem[] = [{ type: "assistant_message", text: notice }];
+      const recent = inTurn("t2", { type: "assistant_message", text: notice });
       const { service, store, refetches, paseo } = await setUp(twoAccounts(), unused, { detectLimit: detectClaudeLimit, recent });
       const context = { paseo } as never;
       await service.onTurnEnded({ agent, turnId: null, outcome: { kind: "failed", error: { message: "Claude session is closed" } }, timeline: [] } as never, context);
       await service.onTurnEnded({ agent, turnId: "t2", outcome: { kind: "canceled" }, timeline: [] } as never, context);
       expect(refetches).toHaveLength(0);
       expect((await store.read()).sessions[AGENT]?.accountId ?? MAIN).toBe(MAIN);
+    });
+
+    it("doesn't read an earlier turn's limit again", async () => {
+      // The page reaches back into the turn that hit the limit. A turn Claude Code starts by itself,
+      // such as after a background task finishes, has no message to stop at, so only the turn ids
+      // keep the old notice (a reply, or Paseo's untagged error row) from moving the agent again.
+      const endings: Row[][] = [
+        inTurn("t1", { type: "assistant_message", text: notice }),
+        [{ item: { type: "assistant_message", text: `[System Error] ${notice}` } }],
+      ];
+      for (const ending of endings) {
+        const recent = [
+          ...inTurn("t1", { type: "user_message", text: "fix the bug" }),
+          ...ending,
+          ...inTurn("t2", { type: "assistant_message", text: "The background build finished." }),
+        ];
+        const { service, store, reopened, notes, paseo } = await setUp(twoAccounts(), unused, { detectLimit: detectClaudeLimit, recent });
+        await service.onTurnEnded({ agent, turnId: "t2", outcome: { kind: "completed" }, timeline: [] } as never, { paseo } as never);
+        expect((await store.read()).accounts.find((a) => a.id === MAIN)?.limitedUntil).toBeNull();
+        expect(reopened).toEqual([]);
+        expect(notes).toEqual([]);
+      }
+    });
+
+    it("still finds the limit when the next turn starts before the page is read", async () => {
+      // Another plugin's follow-up, or a queued message, can start the next turn while the hook is on its way.
+      const recent = [
+        ...inTurn("t1", { type: "user_message", text: "fix the bug" }, { type: "assistant_message", text: notice }),
+        ...inTurn("t2", { type: "user_message", text: "Try again." }),
+      ];
+      const { service, store, reopened, paseo } = await setUp(twoAccounts(), unused, { detectLimit: detectClaudeLimit, recent });
+      await service.onTurnEnded({ agent, turnId: "t1", outcome: { kind: "completed" }, timeline: [] } as never, { paseo } as never);
+      expect((await store.read()).sessions[AGENT]?.accountId).toBe(HELLO);
+      expect(reopened).toEqual([AGENT]);
     });
   });
 
