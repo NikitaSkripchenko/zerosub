@@ -49,6 +49,7 @@ import {
   defaultAccount,
   findAccount,
   mainAccount,
+  type ContinuationChain,
   type StoredAccount,
   type StoredState,
 } from "./state";
@@ -279,8 +280,11 @@ export class Service {
     const staleSessions = Object.entries(state.sessions).filter(([id, session]) => !known.has(id) && old(session.openedAt));
     const staleBindings = Object.entries(state.bindings).filter(([id, binding]) => !known.has(id) && old(binding.at));
     const active = new Set(agents.filter((agent) => !agent.archived).map((agent) => agent.id));
+    // A hand-off that may have sent its prompt stays on record while its tab could come back. A
+    // failed creation sent nothing, so it doesn't keep the task's record alive.
+    const unsettled = (pending: ContinuationChain["pending"]) => pending?.stage === "sending" && known.has(pending.agentId);
     const staleChains = Object.entries(state.continuations).filter(([, chain]) =>
-      !chain.pending && Object.keys(chain.members).every((id) => !active.has(id) && !this.switching.has(id)),
+      !unsettled(chain.pending) && Object.keys(chain.members).every((id) => !active.has(id) && !this.switching.has(id)),
     );
     if (staleSessions.length === 0 && staleBindings.length === 0 && staleChains.length === 0) return;
     await this.store.update((draft) => {

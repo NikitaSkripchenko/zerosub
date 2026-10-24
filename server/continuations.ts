@@ -113,9 +113,11 @@ export class CodexContinuations {
     const chain = Object.values((await this.store.read()).continuations).find((entry) => entry.members[agentId]);
     if (!chain) return null;
     const { pending } = chain;
-    if (pending) {
-      if (pending.stage === "sending" && pending.agentId === agentId) return null;
-      return { agentId: pending.agentId, title: (await snapshot(paseo, pending.agentId))?.title ?? "Codex task" };
+    if (pending?.stage === "sending") {
+      // Only a hand-off whose prompt may have reached a live tab holds the task. A failed creation
+      // sent nothing, and an archived or deleted destination has been given up.
+      const target = await snapshot(paseo, pending.agentId);
+      if (target && !target.archivedAt) return pending.agentId === agentId ? null : { agentId: pending.agentId, title: target.title ?? "Codex task" };
     }
     const current = await currentTab(paseo, chain, agentId);
     return current.id === agentId ? null : { agentId: current.id, title: current.agent?.title ?? "Codex task" };
@@ -137,7 +139,7 @@ export class CodexContinuations {
     return this.locked(root, async () => {
       const chain = await this.openChain(root, ancestors, sourceAgentId);
       if (!chain.members[sourceAgentId]) throw new Error("This older continuation isn't part of the active task. Switch from the task's current tab.");
-      const settled = await this.settlePending(paseo, root, chain, target, source);
+      const settled = await this.settlePending(paseo, root, chain, target);
       if ("done" in settled) return settled.done;
       const { reserved } = settled;
       if (source === "auto") await checkCurrent(paseo, chain, sourceAgentId);
@@ -197,7 +199,6 @@ export class CodexContinuations {
     root: string,
     chain: ContinuationChain,
     target: StoredAccount,
-    source: Source,
   ): Promise<{ done: Continuation } | { reserved?: Pending }> {
     const pending = chain.pending;
     if (!pending) return {};
@@ -209,11 +210,9 @@ export class CodexContinuations {
         if (agent?.lastUserMessageAt) throw new Error(`The unstarted tab ${agent.id} received another message. Check it and archive it before retrying.`);
         return { reserved: pending };
       }
-      if (!agent || !agent.lastUserMessageAt) {
-        // Retargeting an unstarted creation cannot duplicate work. Keep its tab for later reuse.
-        await release();
-        return {};
-      }
+      // Nothing was sent, so dropping the reservation cannot duplicate work. Keep its tab for later reuse.
+      await release();
+      return {};
     }
     if (agent && !agent.archivedAt) {
       const history = await readUpdates(paseo, pending.agentId, undefined, pending.messageId);
@@ -223,11 +222,9 @@ export class CodexContinuations {
       }
     }
     if (!agent || agent.archivedAt) {
-      if (source === "user") {
-        await release();
-        return {};
-      }
-      throw new Error("The previous destination was archived or deleted. Choose an account manually to continue this task.");
+      // The user gave that tab up; it can't run the prompt any more. Automatic switches may carry on too.
+      await release();
+      return {};
     }
     if (busy(agent)) throw new Error("The previous handoff may still be starting. Wait for that tab to stop, then retry.");
     throw new Error(`The previous handoff to ${pending.agentId} could not be confirmed. Check that tab; archive it before retrying the switch.`);

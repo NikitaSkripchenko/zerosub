@@ -604,6 +604,76 @@ describe("Codex account continuations", () => {
     expect(t.notes.some(({ agentId, row }) => agentId === "root" && row.outcome === "stayed")).toBe(false);
   });
 
+  it("resumes after a reset when an automatic hand-off couldn't create its tab", async () => {
+    const t = await setup();
+    const service = t.service();
+    t.create.mockRejectedValueOnce(new Error("creation failed"));
+    await service.onTurnEnded({ agent: t.agents.get("root"), turnId: "limit-turn", outcome: { kind: "failed" }, timeline: [] } as never, { paseo: t.paseo } as never);
+    expect((await t.store.read()).continuations.root!.pending?.stage).toBe("creating");
+    expect(t.notes.some(({ agentId, row }) => agentId === "root" && row.detail?.includes("creation failed"))).toBe(true);
+    expect(await t.manager.continuesElsewhere(t.paseo, "root")).toBeNull();
+    const notes = t.notes.length;
+    vi.useFakeTimers();
+    try {
+      expect((await service.redeem(t.paseo, "a", "root")).continued).toBe(true);
+      expect(t.sent.at(-1)!.id).toBe("root");
+      expect(t.notes.slice(notes).some(({ row }) => row.detail?.includes("continues in"))).toBe(false);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["rejected", "checked"])("fails over again after an automatic hand-off's creation was %s", async (failure) => {
+    const t = await setup();
+    const service = t.service();
+    const create = t.create.getMockImplementation()!;
+    if (failure === "rejected") t.create.mockRejectedValueOnce(new Error("creation failed"));
+    else {
+      // The tab is made, but its account is disabled before the prompt can go.
+      t.create.mockImplementationOnce(async (request) => {
+        await create(request);
+        await t.store.update((draft) => { draft.accounts[1]!.disabled = true; });
+      });
+    }
+    const limit = { agent: t.agents.get("root"), outcome: { kind: "failed" }, timeline: [] };
+    await service.onTurnEnded({ ...limit, turnId: "limit-1" } as never, { paseo: t.paseo } as never);
+    expect(t.send).not.toHaveBeenCalled();
+    expect(await t.manager.continuesElsewhere(t.paseo, "root")).toBeNull();
+    await service.onTurnEnded({ ...limit, turnId: "limit-2" } as never, { paseo: t.paseo } as never);
+    expect(t.send).toHaveBeenCalledTimes(1);
+    const next = t.created.at(-1)!.agentId!;
+    expect(t.sent[0]!.id).toBe(next);
+    expect((await t.store.read()).bindings[next]!.accountId).toBe(failure === "rejected" ? "b" : "c");
+    expect((await t.store.read()).continuations.root!.pending).toBeUndefined();
+    expect((await t.manager.continuesElsewhere(t.paseo, "root"))?.agentId).toBe(next);
+  });
+
+  it("doesn't let an archived destination of an unconfirmed send hold the task", async () => {
+    const t = await setup();
+    const service = t.service();
+    const b = await t.switchTo("root", "b");
+    t.send.mockRejectedValueOnce(new Error("disconnected"));
+    await expect(t.switchTo(b.agentId, "a")).rejects.toThrow(/disconnected/);
+    expect((await t.manager.continuesElsewhere(t.paseo, b.agentId))?.agentId).toBe("root");
+    t.agents.get("root")!.archivedAt = "2026-10-02T00:00:00Z";
+    expect(await t.manager.continuesElsewhere(t.paseo, b.agentId)).toBeNull();
+    await service.onTurnEnded({ agent: t.agents.get(b.agentId), turnId: "limit-turn", outcome: { kind: "failed" }, timeline: [] } as never, { paseo: t.paseo } as never);
+    expect(t.send).toHaveBeenCalledTimes(3);
+    expect(["root", b.agentId]).not.toContain(t.sent.at(-1)!.id);
+    expect((await t.store.read()).continuations.root!.pending).toBeUndefined();
+  });
+
+  it("prunes a finished task whose last hand-off never created its tab", async () => {
+    const t = await setup();
+    const service = t.service();
+    t.create.mockRejectedValueOnce(new Error("creation failed"));
+    await expect(t.switchTo("root", "b")).rejects.toThrow(/creation failed/);
+    t.agents.get("root")!.archivedAt = "2026-10-02T00:00:00Z";
+    await (service as unknown as { prune(paseo: PaseoApi): Promise<void> }).prune(t.paseo);
+    expect((await t.store.read()).continuations.root).toBeUndefined();
+  });
+
   it("records a limit even when looking up the task's other tabs fails", async () => {
     const t = await setup();
     const service = t.service();
