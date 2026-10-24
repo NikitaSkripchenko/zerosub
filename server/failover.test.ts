@@ -63,8 +63,8 @@ function inTurn(turnId: string, ...items: AgentTimelineItem[]): Row[] {
   return items.map((item) => ({ item, turnId }));
 }
 
-/** `recent` is what Paseo hands back when the plugin pages the agent's timeline from its tail. */
-function fakePaseo(recent: readonly Row[] = []) {
+/** `recent` is what Paseo hands back when the plugin pages the agent's timeline from its tail, or how it answers. */
+function fakePaseo(recent: readonly Row[] | (() => Promise<{ entries: readonly Row[] }>) = []) {
   const sent: string[] = [];
   const notes: Array<{ from: string | null; to: string; outcome: string; detail: string | null }> = [];
   const refetches: Array<{ direction?: string; limit?: number }> = [];
@@ -81,7 +81,7 @@ function fakePaseo(recent: readonly Row[] = []) {
             void notes.push(item.data),
           refetch: async (options: { direction?: string; limit?: number } = {}) => {
             refetches.push(options);
-            return { entries: recent };
+            return typeof recent === "function" ? recent() : { entries: recent };
           },
         },
       }),
@@ -96,7 +96,7 @@ interface SetUpOptions {
   /** Reads turns with a real detector instead of taking every failed turn for a limit. */
   detectLimit?: FamilyAdapter["detectLimit"];
   /** The tail of the agent's timeline as Paseo returns it when asked. */
-  recent?: readonly Row[];
+  recent?: Parameters<typeof fakePaseo>[0];
 }
 
 async function setUp(state: Partial<StoredState>, hit: () => LimitHit, options: SetUpOptions = {}) {
@@ -316,6 +316,36 @@ describe("failover", () => {
       await service.onTurnEnded({ agent, turnId: "t1", outcome: { kind: "completed" }, timeline: [] } as never, { paseo } as never);
       expect((await store.read()).sessions[AGENT]?.accountId).toBe(HELLO);
       expect(reopened).toEqual([AGENT]);
+    });
+
+    it("goes on with the turn's own failure when the page can't be read", async () => {
+      const failed = { kind: "failed", error: { message: notice } };
+      const recent = () => Promise.reject(new Error("The daemon went away"));
+      const { service, store, paseo } = await setUp(twoAccounts(), unused, { detectLimit: detectClaudeLimit, recent });
+      await service.onTurnEnded({ agent, turnId: "t1", outcome: failed, timeline: [] } as never, { paseo } as never);
+      expect((await store.read()).sessions[AGENT]?.accountId).toBe(HELLO);
+    });
+
+    it("doesn't wait for a page that never comes", async () => {
+      // The SDK would wait 60 s for an answer, holding up the switch and anything else waiting for the turn to end.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        let asked = () => {};
+        const reading = new Promise<void>((resolve) => (asked = resolve));
+        const recent = () => {
+          asked();
+          return new Promise<never>(() => {});
+        };
+        const failed = { kind: "failed", error: { message: notice } };
+        const { service, store, paseo } = await setUp(twoAccounts(), unused, { detectLimit: detectClaudeLimit, recent });
+        const ended = service.onTurnEnded({ agent, turnId: "t1", outcome: failed, timeline: [] } as never, { paseo } as never);
+        await reading;
+        await vi.advanceTimersByTimeAsync(10_000);
+        await ended;
+        expect((await store.read()).sessions[AGENT]?.accountId).toBe(HELLO);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

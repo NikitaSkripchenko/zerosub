@@ -83,6 +83,8 @@ const RESET_GRACE_MS = 5 * 60_000;
 const AGENT_LIST_MS = 3_000;
 /** How long a default change waits for sessions already being routed to record their account. */
 const ROUTING_WAIT_MS = 5_000;
+/** How long the end of a turn waits for Paseo to page the agent's timeline. The SDK itself waits 60 s. */
+const TURN_READ_MS = 10_000;
 
 const DEFAULT_PREFERENCES: Preferences = {
   autoSwitch: true,
@@ -455,7 +457,9 @@ export class Service {
    * is always `[]`. Claude reports its limits as an ordinary reply, so when the hook arrives empty the
    * tail of the agent's timeline is paged here and read as the turn. A hook that did send the turn
    * (Paseo 0.12) is used as is; a turn that never started (`turnId === null`) has nothing to read, as
-   * `notices()` in limits.ts ignores its timeline anyway. If the page can't be read the event stands.
+   * `notices()` in limits.ts ignores its timeline anyway. If the page can't be read within
+   * `TURN_READ_MS` the event stands: its failure is still read, and a switch waiting for the turn to
+   * end isn't held up.
    *
    * The page can reach back into earlier turns, and a later turn may have started by the time it's
    * read, so only the rows Paseo tagged with this turn's id count: a turn Claude starts on its own
@@ -466,7 +470,11 @@ export class Service {
     const { turnId } = event;
     if (turnId === null || event.timeline.length > 0) return event;
     try {
-      const page = await paseo.agents.ref(event.agent.id).timeline.refetch({ direction: "tail", limit: 40 });
+      const page = await deadline(
+        paseo.agents.ref(event.agent.id).timeline.refetch({ direction: "tail", limit: 40 }),
+        TURN_READ_MS,
+        "Paseo didn't send the agent's timeline in time",
+      );
       return { ...event, timeline: page.entries.filter((entry) => entry.turnId === turnId).map((entry) => entry.item) };
     } catch (error) {
       log(`could not read the last turn of ${event.agent.id}`, error);
@@ -1923,6 +1931,15 @@ function delay(ms: number): Promise<void> {
 
 async function withTimeout(task: Promise<unknown>, ms: number): Promise<void> {
   await Promise.race([task.catch(() => undefined), delay(ms)]);
+}
+
+/** `task`, or a rejection with `message` once `ms` pass without it settling. */
+function deadline<T>(task: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([task, expired]).finally(() => clearTimeout(timer));
 }
 
 function log(message: string, error: unknown): void {
