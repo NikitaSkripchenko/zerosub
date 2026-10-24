@@ -736,6 +736,21 @@ describe("Codex account continuations", () => {
     expect(t.created).toHaveLength(1);
   });
 
+  it("waits for a new tab that is still initializing after creation", async () => {
+    const t = await setup();
+    const create = t.create.getMockImplementation()!;
+    t.create.mockImplementationOnce(async (request) => {
+      await create(request);
+      const agent = t.agents.get(request.agentId!)!;
+      agent.status = "initializing";
+      setTimeout(() => { agent.status = "idle"; }, 400);
+    });
+    const b = await t.switchTo("root", "b");
+    expect(t.sent).toHaveLength(1);
+    expect(t.sent[0]!.id).toBe(b.agentId);
+    expect((await t.store.read()).continuations.root!.pending).toBeUndefined();
+  });
+
   it("doesn't send a handoff when creation opened the target on a different account", async () => {
     const t = await setup();
     const create = t.create.getMockImplementation()!;

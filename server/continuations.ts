@@ -285,8 +285,8 @@ export class CodexContinuations {
     } else {
       result = await continueInNewAgent({ paseo, sourceAgentId: sourceAgent.id, why, agentId: targetId, deferPrompt: true, bind: async () => {} });
       // Creation can take time. A user may have started another turn or disabled the account.
+      const created = await waitForCreated(paseo, targetId);
       const sourceNow = await snapshot(paseo, sourceAgent.id);
-      const created = await snapshot(paseo, targetId);
       const state = await this.store.read();
       const createdOk = created !== undefined && ready(created) && samePlace(sourceAgent, created) && !created.lastUserMessageAt &&
         created.currentModeId === sourceAgent.currentModeId && boundTo(state, targetId, account.id);
@@ -397,6 +397,16 @@ async function waitForSource(paseo: PaseoApi, original: Agent, source: Source): 
   if (!agent || !ready(agent)) throw new Error("Wait for the current agent to stop before switching accounts.");
   if (agent.lastUserMessageAt !== original.lastUserMessageAt) {
     throw new Error("The agent received another message while waiting to switch. Check the current turn before retrying.");
+  }
+  return agent;
+}
+
+/** A tab created without a prompt can still report initializing for a moment before it is idle. */
+async function waitForCreated(paseo: PaseoApi, agentId: string): Promise<Agent | undefined> {
+  let agent = await snapshot(paseo, agentId);
+  for (let attempt = 0; agent?.status === "initializing" && attempt < 20; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    agent = await snapshot(paseo, agentId);
   }
   return agent;
 }
