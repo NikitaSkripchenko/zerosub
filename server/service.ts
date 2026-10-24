@@ -437,10 +437,12 @@ export class Service {
     if (accountId) this.activeAt.set(accountId, Date.now());
     if (event.outcome.kind !== "canceled") {
       const turn = await this.turnWithTimeline(context.paseo, event);
+      // A hand-off quotes the whole conversation, not this turn. Paseo 0.13 sends none, so it pages that itself.
+      const conversation = event.timeline.length > 0 ? event.timeline : undefined;
       const hit = adapter.detectLimit(turn);
-      if (hit) return this.handleUnavailable(context.paseo, agentId, family, turn.timeline, { kind: "limit", hit });
+      if (hit) return this.handleUnavailable(context.paseo, agentId, family, conversation, { kind: "limit", hit });
       if (adapter.detectSignOut(turn) && (await this.confirmSignedOut(agentId, family))) {
-        return this.handleUnavailable(context.paseo, agentId, family, turn.timeline, { kind: "signed_out" });
+        return this.handleUnavailable(context.paseo, agentId, family, conversation, { kind: "signed_out" });
       }
     }
     if (this.deferred.has(agentId)) await this.finishDeferred(context.paseo, agentId, family);
@@ -515,7 +517,7 @@ export class Service {
     paseo: PaseoApi,
     agentId: string,
     family: Family,
-    timeline: readonly AgentTimelineItem[],
+    timeline: readonly AgentTimelineItem[] | undefined,
     problem: Problem,
   ): Promise<void> {
     if (this.switching.has(agentId)) {
@@ -553,7 +555,7 @@ export class Service {
     agentId: string,
     family: Family,
     account: StoredAccount,
-    timeline: readonly AgentTimelineItem[],
+    timeline: readonly AgentTimelineItem[] | undefined,
     problem: Problem,
   ): Promise<void> {
     const adapter = this.adapters[family];

@@ -369,7 +369,8 @@ describe("forking to the other provider", () => {
     ],
   };
 
-  async function setUpFork(modeId: string) {
+  /** `conversation` is the agent's timeline, which Paseo pages from its tail. */
+  async function setUpFork(modeId: string, conversation: readonly Row[] = []) {
     const store = new StateStore(join(root, "state.json"));
     await store.update((draft) =>
       Object.assign(draft, {
@@ -414,7 +415,10 @@ describe("forking to the other provider", () => {
         ref: () => ({
           refresh: async () => ({ agent: source }),
           send: async () => undefined,
-          timeline: { append: async (item: { data: (typeof notes)[number] }) => void notes.push(item.data), refetch: async () => ({ entries: [] }) },
+          timeline: {
+            append: async (item: { data: (typeof notes)[number] }) => void notes.push(item.data),
+            refetch: async ({ limit = 0 }: { limit?: number } = {}) => ({ entries: limit > 0 ? conversation.slice(-limit) : conversation }),
+          },
         }),
       },
     };
@@ -464,6 +468,22 @@ describe("forking to the other provider", () => {
     expect(created).toHaveLength(0);
     expect(notes.at(-1)).toMatchObject({ outcome: "stayed" });
     expect(notes.at(-1)?.detail).toMatch(/no mode as careful as this agent's \(“Always Ask”\)/);
+  });
+
+  it("hands the fork the whole conversation when the hook sends none", async () => {
+    // Paseo 0.13 sends turn-ended hooks no timeline. The fork pages the conversation itself instead
+    // of taking the rows the limit was read from, so it still gets the request from 48 rows back.
+    const steps = Array.from({ length: 45 }, (_, step): AgentTimelineItem => ({ type: "assistant_message", text: `Step ${step + 1} done.` }));
+    const conversation = [
+      ...inTurn("t0", { type: "user_message", text: "Fix the build" }, ...steps),
+      ...inTurn("t", { type: "user_message", text: "Now run the linter" }, { type: "assistant_message", text: "You've hit your session limit · resets 3pm (UTC)" }),
+    ];
+    const { created, limitTurn } = await setUpFork("bypassPermissions", conversation);
+    await limitTurn();
+    const prompt = created[0]?.prompt ?? "";
+    expect(prompt.match(/User: Fix the build/g) ?? []).toHaveLength(1);
+    expect(prompt).toContain("Step 45 done.");
+    expect(prompt).toContain("User: Now run the linter");
   });
 });
 
