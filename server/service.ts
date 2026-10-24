@@ -150,7 +150,7 @@ export class Service {
   /** One failover at a time per exhausted account. */
   private readonly failoverLocks = new Map<string, Mutex>();
   private readonly switchGuard = new SwitchGuard();
-  /** When the guard last told an agent's timeline it stopped switching, so it says so once. */
+  /** When ZeroSub last told an agent's timeline why it didn't switch, by agent and notice, so it says so once. */
   private readonly guardNoticeAt = new Map<string, number>();
   /** When each account's agents last started or ended a turn, to read busy accounts often. */
   private readonly activeAt = new Map<string, number>();
@@ -447,6 +447,7 @@ export class Service {
     this.deferred.delete(agentId);
     this.switchGuard.forget(agentId);
     this.guardNoticeAt.delete(agentId);
+    this.guardNoticeAt.delete(`${agentId}:elsewhere`);
     if (!(await this.store.read()).sessions[agentId]) return;
     await this.store.update((draft) => {
       delete draft.sessions[agentId];
@@ -528,12 +529,17 @@ export class Service {
   ): Promise<void> {
     const adapter = this.adapters[family];
     const now = Date.now();
-    const mayContinue = adapter.portable || !(await this.continuations.continuesElsewhere(paseo, agentId));
+    // A parked Codex tab stays stopped: its task carries on in another tab.
+    const elsewhere = adapter.portable ? null : await this.continuations.continuesElsewhere(paseo, agentId);
     if (problem.kind === "limit" && problem.hit.kind === "window" && this.recentlyRedeemed(account.id)) {
       // This turn hit the limit just before a reset refilled it (another agent's failover or the
       // user spent one moments ago). The account has room again: carry on instead of switching.
+      if (elsewhere) {
+        await this.noteElsewhere(paseo, agentId, account, "limit", null, elsewhere, "resume");
+        return;
+      }
       console.log(`[ZeroSub] ${account.label} was just reset; ${agentId} carries on where it is`);
-      if (mayContinue && this.prefs.autoContinue && this.switchGuard.allows(agentId, now)) {
+      if (this.prefs.autoContinue && this.switchGuard.allows(agentId, now)) {
         this.switchGuard.note(agentId, now);
         await paseo.agents
           .ref(agentId)
@@ -564,7 +570,11 @@ export class Service {
       console.log(`[ZeroSub] ${account.label} is signed out (agent ${agentId})`);
     }
 
-    if (!this.prefs.autoSwitch || !mayContinue) return;
+    if (!this.prefs.autoSwitch) return;
+    if (elsewhere) {
+      await this.noteElsewhere(paseo, agentId, account, problem.kind, resetsAt, elsewhere, "switch");
+      return;
+    }
     const latest = await this.store.read();
     if (this.runningOn(latest, agentId, family) !== account.id) return; // Already moved.
     const base = {
@@ -581,8 +591,7 @@ export class Service {
     if (!this.switchGuard.allows(agentId, now)) {
       console.warn(`[ZeroSub] not switching ${agentId} again: it changed accounts ${this.switchGuard.limit} times in 10 minutes`);
       // Say so once, so the user knows to pick an account rather than wait.
-      if (now - (this.guardNoticeAt.get(agentId) ?? 0) > this.switchGuard.windowMs) {
-        this.guardNoticeAt.set(agentId, now);
+      if (this.noticeDue(agentId, now)) {
         await this.appendRow(paseo, agentId, {
           ...base,
           to: account.label,
@@ -721,6 +730,41 @@ export class Service {
     }
   }
 
+  /** True once per guard window for each agent and notice, so repeated skips don't flood its timeline. */
+  private noticeDue(key: string, now: number): boolean {
+    if (now - (this.guardNoticeAt.get(key) ?? 0) <= this.switchGuard.windowMs) return false;
+    this.guardNoticeAt.set(key, now);
+    return true;
+  }
+
+  /** Says why ZeroSub left a parked Codex tab alone, instead of silently doing nothing. */
+  private async noteElsewhere(
+    paseo: PaseoApi,
+    agentId: string,
+    account: StoredAccount,
+    reason: "limit" | "signed_out",
+    resetsAt: string | null,
+    elsewhere: Continuation,
+    skipped: "switch" | "resume",
+  ): Promise<void> {
+    console.log(`[ZeroSub] not ${skipped === "switch" ? "switching" : "resuming"} ${agentId} automatically: its task continues in ${elsewhere.agentId}`);
+    const now = Date.now();
+    if (!this.noticeDue(`${agentId}:elsewhere`, now)) return;
+    await this.appendRow(paseo, agentId, {
+      family: account.family,
+      from: account.label,
+      to: account.label,
+      reason,
+      resetsAt,
+      continued: false,
+      continuedIn: null,
+      toFamily: null,
+      outcome: "stayed",
+      detail: `This task continues in “${elsewhere.title}”, so ZeroSub didn't ${skipped} this tab automatically. Carry on there, or pick an account from the account button to continue from here.`,
+      at: new Date(now).toISOString(),
+    });
+  }
+
   private async markLimited(accountId: string, until: string, kind: LimitKind): Promise<void> {
     await this.store.update((draft) => {
       const account = findAccount(draft, accountId);
@@ -799,12 +843,17 @@ export class Service {
   }
 
   private async continueAfterReset(paseo: PaseoApi, agentId: string, account: StoredAccount, detail: string): Promise<boolean> {
-    if (!this.prefs.autoContinue || await this.continuations.continuesElsewhere(paseo, agentId)) return false;
+    if (!this.prefs.autoContinue) return false;
     const info = await agentInfo(paseo, agentId);
     if (!info || info.archived || info.status !== "idle") return false;
     if (this.runningOn(await this.store.read(), agentId, account.family) !== account.id) return false;
     // Only resume an agent that this limit actually stopped.
     if (!(await this.lastTurnHitLimit(paseo, agentId, account.family))) return false;
+    const elsewhere = this.adapters[account.family].portable ? null : await this.continuations.continuesElsewhere(paseo, agentId);
+    if (elsewhere) {
+      await this.noteElsewhere(paseo, agentId, account, "limit", null, elsewhere, "resume");
+      return false;
+    }
     const at = new Date().toISOString();
     await this.appendRow(paseo, agentId, {
       family: account.family,

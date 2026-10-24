@@ -9,6 +9,7 @@ import { Service } from "./service";
 import { StateStore, StoredAccountSchema, salvageState } from "./state";
 import type { FamilyResolver } from "./families";
 import { preferences } from "../shared/preferences";
+import type { SwitchRow } from "../shared/timeline";
 
 type PaseoApi = PluginHookContext["paseo"];
 type Create = Parameters<ReturnType<PaseoApi["workspaces"]["ref"]>["agents"]["create"]>[0];
@@ -58,7 +59,7 @@ async function setup() {
   add("root", { type: "assistant_message", text: "The parser has been repaired; tests still need work." });
   const created: Create[] = [];
   const sent: Array<{ id: string; text: string }> = [];
-  const notes: unknown[] = [];
+  const notes: Array<{ agentId: string; row: SwitchRow }> = [];
   const create = vi.fn(async (request: Create) => {
     created.push(request);
     const binding = (await store.read()).bindings[request.agentId!]!;
@@ -94,7 +95,7 @@ async function setup() {
       ref: (id: string) => ({
         refresh: async () => agents.has(id) ? { agent: structuredClone(agents.get(id)) } : null,
         send: (text: string, options?: { messageId?: string }) => send(id, text, options),
-        timeline: { refetch: (options: Parameters<typeof refetch>[1]) => refetch(id, options), append: async (row: unknown) => { notes.push(row); } },
+        timeline: { refetch: (options: Parameters<typeof refetch>[1]) => refetch(id, options), append: async (item: { data: SwitchRow }) => { notes.push({ agentId: id, row: item.data }); } },
       }),
     },
   } as unknown as PaseoApi;
@@ -521,13 +522,23 @@ describe("Codex account continuations", () => {
     expect(t.refetch).toHaveBeenCalledTimes(1);
   });
 
-  it("records a parked tab's limit but does not resume it after a reset", async () => {
+  it("records a parked tab's limit but does not resume it after a reset, and says why once", async () => {
     const t = await setup();
     const service = t.service();
+    const log = vi.spyOn(console, "log");
     await service.setAgentAccount(t.paseo, "root", "b");
-    await service.onTurnEnded({ agent: t.agents.get("root"), turnId: "parked-limit", outcome: { kind: "failed" }, timeline: [] } as never, { paseo: t.paseo } as never);
+    const b = t.created[0]!.agentId!;
+    const limit = { agent: t.agents.get("root"), turnId: "parked-limit", outcome: { kind: "failed" }, timeline: [] };
+    await service.onTurnEnded(limit as never, { paseo: t.paseo } as never);
     expect((await t.store.read()).accounts[0]!.limitedUntil).not.toBeNull();
     expect(t.send).toHaveBeenCalledTimes(1);
+    const skipped = t.notes.filter(({ agentId, row }) => agentId === "root" && row.outcome === "stayed");
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.row.detail).toContain(`continues in “${t.agents.get(b)!.title}”`);
+    expect(log.mock.calls.some(([line]) => String(line).includes(`not switching root automatically: its task continues in ${b}`))).toBe(true);
+    await service.onTurnEnded({ ...limit, turnId: "parked-limit-2" } as never, { paseo: t.paseo } as never);
+    expect(t.notes.filter(({ agentId, row }) => agentId === "root" && row.outcome === "stayed")).toHaveLength(1);
+    log.mockRestore();
     vi.useFakeTimers();
     try {
       expect((await service.redeem(t.paseo, "a", "root")).continued).toBe(false);
