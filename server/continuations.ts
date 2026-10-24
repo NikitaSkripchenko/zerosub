@@ -359,18 +359,19 @@ function newer(left: string | null | undefined, right: string | null | undefined
  * The tab the task continues in: the last handoff's destination, unless the user has since typed
  * in another of the task's tabs. That tab has taken the task over; its new messages are part of it.
  * An archived or deleted destination doesn't hold the task: the most recently used tab left does,
- * starting from the asking tab, which is current when no other tab is left.
+ * starting from the asking tab, which is current when no other tab is left. Neither does a tab
+ * moved to another workspace: it has left the task.
  */
 async function currentTab(paseo: PaseoApi, chain: ContinuationChain, askingId: string): Promise<{ id: string; agent?: Agent }> {
-  const usable = async (id: string) => {
-    const agent = await snapshot(paseo, id);
-    return agent && !agent.archivedAt ? { id, agent } : undefined;
-  };
-  let current = await usable(chain.activeAgentId) ?? await usable(askingId);
+  const asking = await snapshot(paseo, askingId);
+  const active = chain.activeAgentId === askingId ? asking : await snapshot(paseo, chain.activeAgentId);
+  const place = asking ?? active;
+  const usable = (agent: Agent | undefined): agent is Agent => agent !== undefined && !agent.archivedAt && (!place || samePlace(place, agent));
+  let current = usable(active) ? { id: chain.activeAgentId, agent: active } : usable(asking) ? { id: askingId, agent: asking } : undefined;
   for (const [id, entry] of Object.entries(chain.members)) {
     if (id === current?.id || entry.unstarted) continue;
     const agent = await snapshot(paseo, id);
-    if (agent && !agent.archivedAt && (!current || newer(agent.lastUserMessageAt, current.agent.lastUserMessageAt))) current = { id, agent };
+    if (usable(agent) && (!current || newer(agent.lastUserMessageAt, current.agent.lastUserMessageAt))) current = { id, agent };
   }
   return current ?? { id: askingId };
 }

@@ -451,6 +451,17 @@ describe("Codex account continuations", () => {
     expect(t.created).toHaveLength(1);
   });
 
+  it("doesn't let a tab moved to another workspace take the task over", async () => {
+    const t = await setup();
+    const b = await t.switchTo("root", "b");
+    t.agents.get("root")!.workspaceId = "another-workspace";
+    t.add("root", { type: "user_message", text: "Work on something else here." });
+    expect(await t.manager.continuesElsewhere(t.paseo, b.agentId)).toBeNull();
+    const c = await t.manager.continue(t.paseo, b.agentId, t.accounts[2]!, "a limit", "auto");
+    expect(t.sent.at(-1)!.id).toBe(c.agentId);
+    expect(t.sent.at(-1)!.text).not.toContain("Work on something else here");
+  });
+
   it("fails over automatically from a parked tab the user typed in", async () => {
     const t = await setup();
     const service = t.service();
