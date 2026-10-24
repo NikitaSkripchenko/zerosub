@@ -440,7 +440,7 @@ export class Service {
     if (accountId) this.activeAt.set(accountId, Date.now());
     if (event.outcome.kind !== "canceled") {
       const turn = await this.turnWithTimeline(context.paseo, event);
-      // A hand-off quotes the whole conversation, not this turn. Paseo 0.13 sends none, so it pages that itself.
+      // A hand-off quotes the whole conversation, not just this turn. Paseo 0.13 sends none, so the hand-off pages it.
       const conversation = event.timeline.length > 0 ? event.timeline : undefined;
       const hit = adapter.detectLimit(turn);
       if (hit) return this.handleUnavailable(context.paseo, agentId, family, conversation, { kind: "limit", hit });
@@ -456,9 +456,10 @@ export class Service {
   /**
    * Paseo 0.13 (getpaseo/paseo#7477) stopped copying the conversation into turn-ended hooks: `timeline`
    * is always `[]`. Claude reports its limits as an ordinary reply, so when the hook arrives empty the
-   * tail of the agent's timeline is paged here and read as the turn. A hook that did send the turn
-   * (Paseo 0.12) is used as is; a turn that never started (`turnId === null`) has nothing to read, as
-   * `notices()` in limits.ts ignores its timeline anyway. If the page can't be read within
+   * tail of the agent's timeline is paged here and read as the turn. A hook that still sends the
+   * conversation (Paseo 0.12 and older) is used as is. A turn that never started (`turnId === null`)
+   * has nothing to read, as `notices()` in limits.ts ignores its timeline anyway, and a hook without
+   * a turn id gives nothing to tell its rows by. If the page can't be read within
    * `TURN_READ_MS` the event stands: its failure is still read, and a switch waiting for the turn to
    * end isn't held up.
    *
@@ -467,7 +468,7 @@ export class Service {
    * has no message to stop at, and must not find the last turn's limit again. Paseo's
    * `[System Error]` row carries no turn id, but it repeats the failure the hook still sends.
    */
-  private async turnWithTimeline(paseo: PluginHookContext["paseo"], event: TurnEnded): Promise<TurnEnded> {
+  private async turnWithTimeline(paseo: PaseoApi, event: TurnEnded): Promise<TurnEnded> {
     const { turnId } = event;
     if (!turnId || event.timeline.length > 0) return event;
     try {
