@@ -100,12 +100,20 @@ export class CodexContinuations {
 
   constructor(private readonly store: StateStore) {}
 
-  /** Automatic follow-ups (including banked resets) must not wake a parked task tab. */
-  async canContinue(agentId: string): Promise<boolean> {
+  /**
+   * Automatic follow-ups (including banked resets) must not wake a parked task tab. Returns the tab
+   * the task continues in when that isn't this one, else null.
+   */
+  async continuesElsewhere(paseo: PaseoApi, agentId: string): Promise<Continuation | null> {
     const chain = Object.values((await this.store.read()).continuations).find((entry) => entry.members[agentId]);
-    if (!chain) return true;
-    if (chain.pending) return chain.pending.stage === "sending" && chain.pending.agentId === agentId;
-    return chain.activeAgentId === agentId;
+    if (!chain) return null;
+    const { pending } = chain;
+    if (pending) {
+      if (pending.stage === "sending" && pending.agentId === agentId) return null;
+      return { agentId: pending.agentId, title: (await snapshot(paseo, pending.agentId))?.title ?? "Codex task" };
+    }
+    const current = await currentTab(paseo, chain);
+    return current.id === agentId ? null : { agentId: current.id, title: current.agent?.title ?? "Codex task" };
   }
 
   continue(paseo: PaseoApi, sourceAgentId: string, target: StoredAccount, why: string, source: Source): Promise<Continuation> {
@@ -127,7 +135,7 @@ export class CodexContinuations {
       const settled = await this.settlePending(paseo, root, chain, target, source);
       if ("done" in settled) return settled.done;
       const { reserved } = settled;
-      await checkActive(paseo, chain, sourceAgentId, source);
+      if (source === "auto") await checkCurrent(paseo, chain, sourceAgentId);
       const sourceAgent = await waitForSource(paseo, original, source);
       const state = await this.store.read();
       const account = findAccount(state, target.id);
@@ -135,7 +143,7 @@ export class CodexContinuations {
         throw new Error("That ChatGPT account is no longer available. Enable it, sign in or wait for its limit to reset.");
       }
       const snapshots = await memberSnapshots(paseo, chain, sourceAgent);
-      const destination = await pickDestination(paseo, state, chain, snapshots, sourceAgent, account, reserved);
+      const destination = pickDestination(state, chain, snapshots, sourceAgent, account, reserved);
       const gathered = await gatherUpdates(paseo, state, chain, snapshots, sourceAgent, destination);
       const prompt = composePrompt(chain, destination, gathered, why, Boolean(reserved));
       const messageId = reserved?.messageId ?? `${MESSAGE_PREFIX}${randomUUID()}`;
@@ -246,7 +254,6 @@ export class CodexContinuations {
     await this.store.update((draft) => {
       const current = draft.continuations[root]!;
       if (!destination.agent) current.members[targetId] = { ...member(account), unstarted: true };
-      current.members[sourceAgentId]!.parked = gathered.seen[sourceAgentId];
       current.pending = {
         agentId: targetId,
         messageId,
@@ -342,12 +349,32 @@ async function adoptDescendants(paseo: PaseoApi, original: Agent, ancestors: Age
   }
 }
 
-/** Only the task's current tab may hand it on, unless the user switches from an orphaned task. */
-async function checkActive(paseo: PaseoApi, chain: ContinuationChain, sourceAgentId: string, source: Source): Promise<void> {
-  if (chain.activeAgentId === sourceAgentId) return;
-  const active = await snapshot(paseo, chain.activeAgentId);
-  if (source !== "user" || (active && !active.archivedAt)) {
-    throw new Error(`This task now continues in “${active?.title ?? chain.activeAgentId}”. Switch accounts from that tab.`);
+function newer(left: string | null | undefined, right: string | null | undefined): boolean {
+  return left ? !right || Date.parse(left) > Date.parse(right) : false;
+}
+
+/**
+ * The tab the task continues in: the last handoff's destination, unless the user has since typed
+ * in another of the task's tabs. That tab has taken the task over; its new messages are part of it.
+ */
+async function currentTab(paseo: PaseoApi, chain: ContinuationChain): Promise<{ id: string; agent?: Agent }> {
+  let current = { id: chain.activeAgentId, agent: await snapshot(paseo, chain.activeAgentId) };
+  for (const [id, entry] of Object.entries(chain.members)) {
+    if (id === current.id || entry.unstarted) continue;
+    const agent = await snapshot(paseo, id);
+    if (agent && !agent.archivedAt && newer(agent.lastUserMessageAt, current.agent?.lastUserMessageAt)) current = { id, agent };
+  }
+  return current;
+}
+
+/**
+ * Automatic switches only move the task's current tab. The user may switch from any of its tabs:
+ * the destination gets every other tab's updates, so nothing is lost either way.
+ */
+async function checkCurrent(paseo: PaseoApi, chain: ContinuationChain, sourceAgentId: string): Promise<void> {
+  const current = await currentTab(paseo, chain);
+  if (current.id !== sourceAgentId) {
+    throw new Error(`This task now continues in “${current.agent?.title ?? current.id}”. Switch accounts from that tab.`);
   }
 }
 
@@ -381,15 +408,14 @@ async function memberSnapshots(paseo: PaseoApi, chain: ContinuationChain, source
 }
 
 /** Reuse the task's tab for this account when it's still exactly that account's, else make one. */
-async function pickDestination(
-  paseo: PaseoApi,
+function pickDestination(
   state: StoredState,
   chain: ContinuationChain,
   snapshots: Map<string, Agent>,
   sourceAgent: Agent,
   account: StoredAccount,
   reserved: Pending | undefined,
-): Promise<Destination> {
+): Destination {
   const candidate = Object.entries(chain.members).find(([id, entry]) => {
     const agent = snapshots.get(id);
     return id !== sourceAgent.id && entry.accountId === account.id && entry.identity !== null && entry.identity === account.identity &&
@@ -409,12 +435,7 @@ async function pickDestination(
   if (agent.currentModeId !== sourceAgent.currentModeId) {
     throw new Error(`The existing tab ${targetId} has a different permission mode. Align its mode with the current tab before switching.`);
   }
-  if (entry.parked) {
-    const own = await readUpdates(paseo, targetId, entry.parked);
-    if (own.mark.epoch !== entry.parked.epoch || own.entries.some(({ item }) => item.type === "user_message")) {
-      throw new Error(`The existing tab ${targetId} changed while this task was elsewhere. Review that tab before continuing; archive it if it belongs to another task.`);
-    }
-  }
+  // Anything the user typed in this tab while it was parked is part of the task; it already knows it.
   return { targetId, agent, entry };
 }
 

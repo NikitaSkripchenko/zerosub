@@ -179,6 +179,9 @@ describe("Codex account continuations", () => {
     ]);
     expect(a.agentId).toBe(b.agentId);
     expect(t.created).toHaveLength(1);
+    // As in the daemon, an accepted message starts a turn in its tab.
+    const send = t.send.getMockImplementation()!;
+    t.send.mockImplementation(async (id, text, options) => { await send(id, text, options); t.agents.get(id)!.status = "running"; });
     const results = await Promise.allSettled([t.switchTo(a.agentId, "a"), t.switchTo(a.agentId, "c")]);
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
     expect(t.sent).toHaveLength(2);
@@ -400,13 +403,50 @@ describe("Codex account continuations", () => {
     expect(t.send).toHaveBeenCalledTimes(1);
   });
 
-  it("leaves a parked tab's new user conversation alone", async () => {
+  it("switches back to a parked tab the user typed in, sending only the other tab's updates", async () => {
     const t = await setup();
     const b = await t.switchTo("root", "b");
-    t.add("root", { type: "user_message", text: "A separate conversation while parked." });
-    await expect(t.switchTo(b.agentId, "a")).rejects.toThrow(/changed while this task was elsewhere/);
-    expect(t.send).toHaveBeenCalledTimes(1);
+    t.add(b.agentId, { type: "assistant_message", text: "B finished the parser." });
+    t.add("root", { type: "user_message", text: "Also update the changelog." });
+    expect((await t.switchTo(b.agentId, "a")).agentId).toBe("root");
+    expect(t.sent.at(-1)!.text).toContain("B finished the parser");
+    expect(t.sent.at(-1)!.text).not.toContain("Also update the changelog");
     expect(t.created).toHaveLength(1);
+  });
+
+  it("lets a parked tab the user typed in take the task over", async () => {
+    const t = await setup();
+    const b = await t.switchTo("root", "b");
+    t.add(b.agentId, { type: "assistant_message", text: "B finished the parser." });
+    t.add("root", { type: "user_message", text: "Also update the changelog." });
+    expect(await t.manager.continuesElsewhere(t.paseo, "root")).toBeNull();
+    expect((await t.manager.continuesElsewhere(t.paseo, b.agentId))?.agentId).toBe("root");
+    expect((await t.switchTo("root", "b")).agentId).toBe(b.agentId);
+    expect(t.sent.at(-1)!.text).toContain("Also update the changelog");
+    expect(t.sent.at(-1)!.text).not.toContain("B finished the parser");
+    expect(t.created).toHaveLength(1);
+  });
+
+  it("fails over automatically from a parked tab the user typed in", async () => {
+    const t = await setup();
+    const service = t.service();
+    const b = (await service.setAgentAccount(t.paseo, "root", "b")).continuedIn!;
+    t.add("root", { type: "user_message", text: "Also update the changelog." });
+    await service.onTurnEnded({ agent: t.agents.get("root"), turnId: "limit-turn", outcome: { kind: "failed" }, timeline: [] } as never, { paseo: t.paseo } as never);
+    expect(t.sent.at(-1)!.text).toContain("Also update the changelog");
+    expect([b.agentId, t.created.at(-1)!.agentId]).toContain(t.sent.at(-1)!.id);
+    expect(await t.manager.continuesElsewhere(t.paseo, "root")).not.toBeNull();
+  });
+
+  it("lets the user switch from a parked tab without waking it", async () => {
+    const t = await setup();
+    const b = await t.switchTo("root", "b");
+    t.add(b.agentId, { type: "assistant_message", text: "B finished the parser." });
+    const c = await t.switchTo("root", "c");
+    expect(c.agentId).not.toBe(b.agentId);
+    expect(t.sent.at(-1)!.text).toContain("B finished the parser");
+    expect(t.sent.map(({ id }) => id)).not.toContain("root");
+    await expect(t.manager.continue(t.paseo, b.agentId, t.accounts[0]!, "a limit", "auto")).rejects.toThrow(/now continues in/);
   });
 
   it("retries failed creation using its reserved ID, with no work dispatched before creation", async () => {

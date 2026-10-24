@@ -528,7 +528,7 @@ export class Service {
   ): Promise<void> {
     const adapter = this.adapters[family];
     const now = Date.now();
-    const mayContinue = adapter.portable || await this.continuations.canContinue(agentId);
+    const mayContinue = adapter.portable || !(await this.continuations.continuesElsewhere(paseo, agentId));
     if (problem.kind === "limit" && problem.hit.kind === "window" && this.recentlyRedeemed(account.id)) {
       // This turn hit the limit just before a reset refilled it (another agent's failover or the
       // user spent one moments ago). The account has room again: carry on instead of switching.
@@ -799,7 +799,7 @@ export class Service {
   }
 
   private async continueAfterReset(paseo: PaseoApi, agentId: string, account: StoredAccount, detail: string): Promise<boolean> {
-    if (!this.prefs.autoContinue || !await this.continuations.canContinue(agentId)) return false;
+    if (!this.prefs.autoContinue || await this.continuations.continuesElsewhere(paseo, agentId)) return false;
     const info = await agentInfo(paseo, agentId);
     if (!info || info.archived || info.status !== "idle") return false;
     if (this.runningOn(await this.store.read(), agentId, account.family) !== account.id) return false;

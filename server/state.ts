@@ -56,8 +56,6 @@ const ContinuationMemberSchema = z.object({
   email: z.string().nullable(),
   /** Timeline ranges already known by this tab; no conversation text is stored here. */
   seen: z.record(z.string(), TimelineMarkSchema).default({}),
-  /** Last observed source position when this tab handed the task away. */
-  parked: TimelineMarkSchema.optional(),
   /** Reserved/created without a handoff; not a source of task history yet. */
   unstarted: z.boolean().optional(),
 });
