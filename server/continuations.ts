@@ -117,7 +117,7 @@ export class CodexContinuations {
       if (pending.stage === "sending" && pending.agentId === agentId) return null;
       return { agentId: pending.agentId, title: (await snapshot(paseo, pending.agentId))?.title ?? "Codex task" };
     }
-    const current = await currentTab(paseo, chain);
+    const current = await currentTab(paseo, chain, agentId);
     return current.id === agentId ? null : { agentId: current.id, title: current.agent?.title ?? "Codex task" };
   }
 
@@ -361,15 +361,21 @@ function newer(left: string | null | undefined, right: string | null | undefined
 /**
  * The tab the task continues in: the last handoff's destination, unless the user has since typed
  * in another of the task's tabs. That tab has taken the task over; its new messages are part of it.
+ * An archived or deleted destination doesn't hold the task: the most recently used tab left does,
+ * starting from the asking tab, which is current when no other tab is left.
  */
-async function currentTab(paseo: PaseoApi, chain: ContinuationChain): Promise<{ id: string; agent?: Agent }> {
-  let current = { id: chain.activeAgentId, agent: await snapshot(paseo, chain.activeAgentId) };
-  for (const [id, entry] of Object.entries(chain.members)) {
-    if (id === current.id || entry.unstarted) continue;
+async function currentTab(paseo: PaseoApi, chain: ContinuationChain, askingId: string): Promise<{ id: string; agent?: Agent }> {
+  const usable = async (id: string) => {
     const agent = await snapshot(paseo, id);
-    if (agent && !agent.archivedAt && newer(agent.lastUserMessageAt, current.agent?.lastUserMessageAt)) current = { id, agent };
+    return agent && !agent.archivedAt ? { id, agent } : undefined;
+  };
+  let current = await usable(chain.activeAgentId) ?? await usable(askingId);
+  for (const [id, entry] of Object.entries(chain.members)) {
+    if (id === current?.id || entry.unstarted) continue;
+    const agent = await snapshot(paseo, id);
+    if (agent && !agent.archivedAt && (!current || newer(agent.lastUserMessageAt, current.agent.lastUserMessageAt))) current = { id, agent };
   }
-  return current;
+  return current ?? { id: askingId };
 }
 
 /**
@@ -377,7 +383,7 @@ async function currentTab(paseo: PaseoApi, chain: ContinuationChain): Promise<{ 
  * the destination gets every other tab's updates, so nothing is lost either way.
  */
 async function checkCurrent(paseo: PaseoApi, chain: ContinuationChain, sourceAgentId: string): Promise<void> {
-  const current = await currentTab(paseo, chain);
+  const current = await currentTab(paseo, chain, sourceAgentId);
   if (current.id !== sourceAgentId) {
     throw new Error(`This task now continues in “${current.agent?.title ?? current.id}”. Switch accounts from that tab.`);
   }

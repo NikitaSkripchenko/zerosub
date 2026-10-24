@@ -572,6 +572,38 @@ describe("Codex account continuations", () => {
     }
   });
 
+  it("resumes a tab after a reset once the tab its task moved to is archived", async () => {
+    const t = await setup();
+    const service = t.service();
+    await service.setAgentAccount(t.paseo, "root", "b");
+    const b = t.created[0]!.agentId!;
+    await service.onTurnEnded({ agent: t.agents.get("root"), turnId: "parked-limit", outcome: { kind: "failed" }, timeline: [] } as never, { paseo: t.paseo } as never);
+    t.agents.get(b)!.archivedAt = "2026-10-02T00:00:00Z";
+    expect(await t.manager.continuesElsewhere(t.paseo, "root")).toBeNull();
+    const notes = t.notes.length;
+    vi.useFakeTimers();
+    try {
+      expect((await service.redeem(t.paseo, "a", "root")).continued).toBe(true);
+      expect(t.sent.at(-1)!.id).toBe("root");
+      expect(t.notes.slice(notes).some(({ row }) => row.detail?.includes("continues in"))).toBe(false);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails over automatically once the tab its task moved to is archived", async () => {
+    const t = await setup();
+    const service = t.service();
+    const b = (await service.setAgentAccount(t.paseo, "root", "b")).continuedIn!;
+    t.agents.get(b.agentId)!.archivedAt = "2026-10-02T00:00:00Z";
+    await service.onTurnEnded({ agent: t.agents.get("root"), turnId: "limit-turn", outcome: { kind: "failed" }, timeline: [] } as never, { paseo: t.paseo } as never);
+    expect((await t.store.read()).accounts[0]!.limitedUntil).not.toBeNull();
+    expect(t.send).toHaveBeenCalledTimes(2);
+    expect(["root", b.agentId]).not.toContain(t.sent.at(-1)!.id);
+    expect(t.notes.some(({ agentId, row }) => agentId === "root" && row.outcome === "stayed")).toBe(false);
+  });
+
   it("allows an explicit retry after an uncertain destination was deleted", async () => {
     const t = await setup();
     const b = await t.switchTo("root", "b");
