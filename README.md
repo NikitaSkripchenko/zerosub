@@ -53,11 +53,11 @@ Then open **Accounts (ZeroSub)** in the sidebar.
 ### Claude vs. ChatGPT when switching mid-conversation
 
 - **Claude:** a conversation moves to another account in place. The agent reopens on the new account with its full history and continues.
-- **ChatGPT (Codex):** Codex encrypts its reasoning per ChatGPT account, so another account can't read an existing thread. The thread stays on its account. When it hits a limit, or you pick another account for it, ZeroSub continues in that task's tab for the other account, creating a **continuation agent** in the same workspace only on the first visit. Switching A → B → A → B reuses the two tabs. Independent tasks keep separate tabs, even in the same workspace.
-  - A returning tab receives user instructions and progress since its last visit, and is asked to inspect the current files and Git diff before continuing. ZeroSub keeps timeline positions across plugin restarts and avoids copying its own handoff prompts again. If an earlier tab has been deleted or moved, a full handoff preserves the current tab's available history; later switches return to incremental updates.
-  - Reuse requires the same provider, workspace, directory, account identity and permission mode. A missing, archived or reassigned tab is replaced. A busy tab, a pending permission request, a changed standby conversation or a different permission mode stops the switch with an explanation; finish or inspect that tab first. Removed, signed-out, disabled and limited accounts cannot receive a handoff.
-  - If prompt delivery cannot be confirmed after a disconnect, ZeroSub stops rather than sending twice. Retrying checks the destination's timeline for the handoff. If delivery is still uncertain, inspect that tab and archive it before retrying. Creating a tab without starting work can be retried safely.
-  - Existing continuation labels are adopted on the first switch after upgrading. Older releases can still read the account pins, but discard the new reuse metadata when saving the registry. New Codex agents simply start on the chosen account.
+- **ChatGPT (Codex):** Codex encrypts its reasoning per ChatGPT account, so another account can't read an existing thread. The thread stays on its account. When it hits a limit, or you pick another account for it, ZeroSub carries the task on in its tab for the other account: a **continuation agent** in the same workspace, created on the first visit and reused after that. Switching A → B → A → B keeps two tabs, not four. Independent tasks keep separate tabs, even in the same workspace.
+  - A tab you return to gets the instructions and progress since it was last used, and checks the current files and Git diff before going on. Very long instructions are shortened, keeping the original request and the latest ones.
+  - You can type in any of a task's tabs and switch from any of them. The tab you used last is where the task continues: automatic switches and resets only move that tab, and another tab that hits a limit says in its timeline where the task went.
+  - A tab is reused while it is in the same workspace with the same account and permission mode; otherwise ZeroSub starts a new one. A switch waits while one of the task's tabs is working or asking for permission.
+  - ZeroSub never sends a hand-off twice. If a lost connection leaves one unconfirmed, the switch stops and names the tab to check. Continuation agents from earlier versions are picked up on the first switch. New Codex agents simply start on the chosen account.
 
 ### Banked resets
 
@@ -74,7 +74,7 @@ ZeroSub tries these in order, and a timeline note says which one happened:
 
 1. **Use a banked reset**, if you turned on **Use banked resets when every account is out**.
 2. **Fork the chat to the other provider**, if you turned on **When every account is out, fork the chat to the other provider** (off by default). A stopped Claude chat continues in a new ChatGPT agent, or the other way round:
-   - The new agent opens in the same workspace with the conversation so far and goes straight back to work. It uses the other provider's default model and its account with the most room left.
+   - The new agent opens in the same workspace with the conversation so far and goes straight back to work. If that conversation began as a hand-off itself, only the start and end of the earlier one are quoted. It uses the other provider's default model and its account with the most room left.
    - Its permission mode matches the original's level. Bypass becomes Full Access, and Accept File Edits becomes Default Permissions. Codex has no read-only or ask-first mode, so a Claude agent in Plan Mode or Always Ask isn't forked. ZeroSub never gives a fork more freedom than you gave the original.
    - The original agent stays as it was, and prompting it again while its provider is still out points to the same fork rather than starting another.
    - With the option off, a stopped agent's account button offers **Continue on ChatGPT (new agent)…** (or Claude) instead, with a confirmation.
