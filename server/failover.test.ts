@@ -356,7 +356,7 @@ describe("failover", () => {
         const failed = { kind: "failed", error: { message: notice } };
         const { service, store, paseo } = await setUp(twoAccounts(), unused, { detectLimit: detectClaudeLimit, recent });
         const ended = service.onTurnEnded({ agent, turnId: "t1", outcome: failed, timeline: [] } as never, { paseo } as never);
-        await reading;
+        await Promise.race([reading, ended]); // the page is asked for, or the turn needed none
         await vi.advanceTimersByTimeAsync(10_000);
         await ended;
         expect((await store.read()).sessions[AGENT]?.accountId).toBe(HELLO);
