@@ -35,6 +35,7 @@ import { CodexContinuations } from "./continuations";
 import { CONTINUED_FROM_LABEL, continueInNewAgent, type Continuation } from "./handoff";
 import { removeHome } from "./homes";
 import { Mutex } from "./json-file";
+import { turnRows } from "./limits";
 import { canSignInWithBrowser } from "./machine";
 import { equivalentMode } from "./modes";
 import { homesDir } from "./paths";
@@ -462,20 +463,20 @@ export class Service {
    * end isn't held up.
    *
    * The page can reach back into earlier turns, and a later turn may have started by the time it's
-   * read, so only the rows Paseo tagged with this turn's id count: a turn Claude starts on its own
-   * has no message of its own to stop at, and must not find the last turn's limit again. Paseo's
+   * read, so only this turn's rows count (`turnRows()` in limits.ts): a turn Claude starts by itself
+   * has no message to stop at, and must not find the last turn's limit again. Paseo's
    * `[System Error]` row carries no turn id, but it repeats the failure the hook still sends.
    */
   private async turnWithTimeline(paseo: PluginHookContext["paseo"], event: TurnEnded): Promise<TurnEnded> {
     const { turnId } = event;
-    if (turnId === null || event.timeline.length > 0) return event;
+    if (!turnId || event.timeline.length > 0) return event;
     try {
       const page = await deadline(
         paseo.agents.ref(event.agent.id).timeline.refetch({ direction: "tail", limit: 40 }),
         TURN_READ_MS,
         "Paseo didn't send the agent's timeline in time",
       );
-      return { ...event, timeline: page.entries.filter((entry) => entry.turnId === turnId).map((entry) => entry.item) };
+      return { ...event, timeline: turnRows(page.entries, turnId) };
     } catch (error) {
       log(`could not read the last turn of ${event.agent.id}`, error);
       return event;

@@ -274,11 +274,13 @@ describe("failover", () => {
       expect((await store.read()).sessions[AGENT]?.accountId ?? MAIN).toBe(MAIN);
     });
 
-    it("leaves Paseo alone for turns that never started or were canceled", async () => {
+    it("leaves Paseo alone for turns that never started, have no id, or were canceled", async () => {
       const recent = inTurn("t2", { type: "assistant_message", text: notice });
       const { service, store, refetches, paseo } = await setUp(twoAccounts(), unused, { detectLimit: detectClaudeLimit, recent });
       const context = { paseo } as never;
       await service.onTurnEnded({ agent, turnId: null, outcome: { kind: "failed", error: { message: "Claude session is closed" } }, timeline: [] } as never, context);
+      // Without an id there's nothing to tell this turn's rows by: untagged rows include replayed history.
+      await service.onTurnEnded({ agent, outcome: { kind: "completed" }, timeline: [] } as never, context);
       await service.onTurnEnded({ agent, turnId: "t2", outcome: { kind: "canceled" }, timeline: [] } as never, context);
       expect(refetches).toHaveLength(0);
       expect((await store.read()).sessions[AGENT]?.accountId ?? MAIN).toBe(MAIN);
@@ -304,6 +306,21 @@ describe("failover", () => {
         expect(reopened).toEqual([]);
         expect(notes).toEqual([]);
       }
+    });
+
+    it("doesn't take an earlier turn with the same id for this one", async () => {
+      // Providers count turns per session, and some session restarts keep the timeline (a voice-mode
+      // toggle does), so an earlier turn can carry this turn's id. The prompt between them ends the turn.
+      const recent = [
+        ...inTurn("autonomous-turn-2", { type: "assistant_message", text: notice }),
+        ...inTurn("foreground-turn-1", { type: "user_message", text: "continue" }, { type: "assistant_message", text: "Restarted the build." }),
+        ...inTurn("autonomous-turn-2", { type: "assistant_message", text: "The build finished." }),
+      ];
+      const { service, store, reopened, paseo } = await setUp(twoAccounts(), unused, { detectLimit: detectClaudeLimit, recent });
+      const turn = { agent, turnId: "autonomous-turn-2", outcome: { kind: "completed" }, timeline: [] };
+      await service.onTurnEnded(turn as never, { paseo } as never);
+      expect((await store.read()).accounts.find((a) => a.id === MAIN)?.limitedUntil).toBeNull();
+      expect(reopened).toEqual([]);
     });
 
     it("still finds the limit when the next turn starts before the page is read", async () => {
