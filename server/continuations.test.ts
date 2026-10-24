@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { PluginHookContext } from "@getpaseo/plugin/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentTimelineItem, FamilyAdapter } from "./adapter";
-import { CodexContinuations } from "./continuations";
+import { CodexContinuations, fitInstructions } from "./continuations";
 import { Service } from "./service";
 import { StateStore, StoredAccountSchema, salvageState } from "./state";
 import type { FamilyResolver } from "./families";
@@ -378,13 +378,25 @@ describe("Codex account continuations", () => {
     expect(t.send).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["missing", "oversized"])("does not create a continuation with %s task instructions", async (kind) => {
+  it("does not create a continuation with missing task instructions", async () => {
     const t = await setup();
     t.timelines.set("root", []);
-    if (kind === "oversized") t.add("root", { type: "user_message", text: "x".repeat(60_001) });
     await expect(t.switchTo("root", "b")).rejects.toThrow(/instructions/);
     expect(t.created).toHaveLength(0);
     expect(t.send).not.toHaveBeenCalled();
+  });
+
+  it("shortens very long instructions instead of refusing the handoff", async () => {
+    const t = await setup();
+    for (let i = 0; i < 30; i++) t.add("root", { type: "user_message", text: `Pasted log ${i}: ${"x".repeat(5_000)}` });
+    t.add("root", { type: "user_message", text: "Latest: only fix the flaky test." });
+    const b = await t.switchTo("root", "b");
+    const prompt = t.sent.at(-1)!.text;
+    expect(t.sent.at(-1)!.id).toBe(b.agentId);
+    expect(prompt).toContain("Repair the build; preserve the public API.");
+    expect(prompt).toContain("Latest: only fix the flaky test.");
+    expect(prompt).toMatch(/\[… \d+ earlier instructions omitted to fit this update …\]/);
+    expect(prompt.length).toBeLessThan(70_000);
   });
 
   it("reopens a closed destination through the same SDK send without changing its pin", async () => {
@@ -659,5 +671,28 @@ describe("Codex account continuations", () => {
     expect(t.sent.at(-1)!.text).toContain("Work since the legacy handoff");
     expect(t.sent.at(-1)!.text).not.toContain("OLD FULL COPY");
     expect(salvageState({ accounts: [], bindings: {}, sessions: {} }).state.continuations).toEqual({});
+  });
+});
+
+describe("fitting pending instructions", () => {
+  it("keeps them all when they fit", () => {
+    expect(fitInstructions(["one", "two"])).toBe("one\n\ntwo");
+  });
+
+  it("keeps the start and end of one oversized message", () => {
+    const text = fitInstructions([`START ${"x".repeat(100_000)} END`], 10_000);
+    expect(text.length).toBeLessThanOrEqual(10_000);
+    expect(text).toMatch(/^START/);
+    expect(text).toMatch(/END$/);
+    expect(text).toContain("omitted");
+  });
+
+  it("keeps the first and the latest instruction even when the latest alone is too long", () => {
+    const text = fitInstructions(["ORIGINAL", "middle", `LATEST ${"y".repeat(50_000)} TAIL`], 10_000);
+    expect(text.length).toBeLessThanOrEqual(10_000);
+    expect(text).toMatch(/^ORIGINAL/);
+    expect(text).toContain("[… 1 earlier instruction omitted to fit this update …]");
+    expect(text).not.toContain("middle");
+    expect(text).toMatch(/TAIL$/);
   });
 });

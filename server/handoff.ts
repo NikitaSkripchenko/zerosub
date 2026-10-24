@@ -15,6 +15,17 @@ function clip(text: string, max: number): string {
   return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max)}…`;
 }
 
+/**
+ * Fits a long text into `max` characters by keeping its start (where the request usually is) and
+ * its end (the most recent context), with a marker where the middle was cut. The end gets more room.
+ */
+export function keepEnds(text: string, max: number, marker = "[… omitted …]"): string {
+  if (text.length <= max) return text;
+  const room = Math.max(0, max - marker.length - 4);
+  const head = Math.floor(room / 3);
+  return `${text.slice(0, head).trimEnd()}\n\n${marker}\n\n${text.slice(text.length - (room - head)).trimStart()}`;
+}
+
 function describeTool(item: Extract<AgentTimelineItem, { type: "tool_call" }>): string {
   const detail = item.detail;
   const failed = item.status === "failed" ? " (failed)" : "";

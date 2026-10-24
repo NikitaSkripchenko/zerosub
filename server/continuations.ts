@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { PluginHookContext } from "@getpaseo/plugin/server";
 import type { AgentTimelineItem } from "./adapter";
-import { buildTranscript, CONTINUED_FROM_LABEL, continueInNewAgent, type Continuation } from "./handoff";
+import { buildTranscript, CONTINUED_FROM_LABEL, continueInNewAgent, keepEnds, type Continuation } from "./handoff";
 import { Mutex } from "./json-file";
 import { isUsable } from "./routing";
 import { findAccount, MAIN_ACCOUNT_ID, StateStore, type ContinuationChain, type StoredAccount, type StoredState } from "./state";
@@ -15,6 +15,9 @@ type Source = "auto" | "user";
 type Update = { item: AgentTimelineItem; timestamp: string };
 const MESSAGE_PREFIX = "zerosub-handoff-";
 const MAX_PAGES = 100;
+const MAX_INSTRUCTIONS = 60_000;
+const MAX_ORIGIN = 6_000;
+const OMITTED = "[… part of this message omitted to fit this update …]";
 
 function samePlace(left: Agent, right: Agent): boolean {
   return left.provider === right.provider && left.cwd === right.cwd && left.workspaceId === right.workspaceId;
@@ -485,6 +488,32 @@ function ownHandoff(item: Extract<AgentTimelineItem, { type: "user_message" }>, 
   return Object.keys(chain.members).length > 1 && item.text.startsWith("This task is continuing from an earlier Codex session that stopped because");
 }
 
+/**
+ * Every pending user instruction when they fit; the tool/assistant recap is clipped separately.
+ * Otherwise the first one (the original request, for a new tab) and as many of the most recent as
+ * fit, saying how many were left out. Pasted logs mustn't stop a task from moving on.
+ */
+export function fitInstructions(texts: string[], max = MAX_INSTRUCTIONS): string {
+  const all = texts.join("\n\n");
+  if (all.length <= max) return all;
+  const [first = "", ...rest] = texts;
+  if (!rest.length) return keepEnds(first, max, OMITTED);
+  const head = keepEnds(first, MAX_ORIGIN, OMITTED);
+  let room = max - head.length - 100; // Leaves space for the note below.
+  const recent: string[] = [];
+  for (let index = rest.length - 1; index >= 0 && room > 0; index -= 1) {
+    const text = rest[index]!;
+    if (text.length + 2 > room && recent.length) break;
+    // The latest instruction always stays, shortened if it alone is too long.
+    const kept = text.length + 2 > room ? keepEnds(text, room - 2, OMITTED) : text;
+    recent.unshift(kept);
+    room -= kept.length + 2;
+  }
+  const left = rest.length - recent.length;
+  const note = left ? [`[… ${left} earlier instruction${left === 1 ? "" : "s"} omitted to fit this update …]`] : [];
+  return [head, ...note, ...recent].join("\n\n");
+}
+
 function composePrompt(chain: ContinuationChain, destination: Destination, gathered: Gathered, why: string, reserved: boolean): string {
   const { updates, fallback } = gathered;
   // After a downgrade (or loss of the original tab), the oldest surviving tab may start with
@@ -493,10 +522,8 @@ function composePrompt(chain: ContinuationChain, destination: Destination, gathe
   const origin = fresh ? updates.find(({ item }) => item.type === "user_message")?.item : undefined;
   const items = updates.map((entry) => entry.item).filter((item) =>
     fallback || item === origin || item.type !== "user_message" || !ownHandoff(item, chain));
-  // Keep every new user instruction even when the tool/assistant recap needs clipping.
-  const instructions = items.filter((item) => item.type === "user_message").map((item) => item.text).join("\n\n");
+  const instructions = fitInstructions(items.filter((item) => item.type === "user_message").map((item) => item.text));
   if (!destination.agent && !instructions.trim()) throw new Error("Couldn't read the task's instructions. Provide a current summary before switching.");
-  if (instructions.length > 60_000) throw new Error("The pending user instructions are too large for a safe handoff. Start a new task with a current summary.");
   return [
     `This task is continuing because ${why}.`,
     destination.agent ? "You are returning to your existing account-bound thread. Your older history may be stale." : "Continue this task in your account-bound thread.",
