@@ -604,6 +604,22 @@ describe("Codex account continuations", () => {
     expect(t.notes.some(({ agentId, row }) => agentId === "root" && row.outcome === "stayed")).toBe(false);
   });
 
+  it("records a limit even when looking up the task's other tabs fails", async () => {
+    const t = await setup();
+    const service = t.service();
+    const b = (await service.setAgentAccount(t.paseo, "root", "b")).continuedIn!;
+    const ref = t.paseo.agents.ref;
+    t.paseo.agents.ref = ((id: string) => id === b.agentId ? { ...ref(id), refresh: async () => { throw new Error("daemon unreachable"); } } : ref(id)) as typeof ref;
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await service.onTurnEnded({ agent: t.agents.get("root"), turnId: "limit-turn", outcome: { kind: "failed" }, timeline: [] } as never, { paseo: t.paseo } as never);
+      expect((await t.store.read()).accounts[0]!.limitedUntil).not.toBeNull();
+      expect(error.mock.calls.some(([line]) => String(line).includes("could not find where root's task continues"))).toBe(true);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
   it("allows an explicit retry after an uncertain destination was deleted", async () => {
     const t = await setup();
     const b = await t.switchTo("root", "b");

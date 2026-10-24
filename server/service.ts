@@ -529,8 +529,14 @@ export class Service {
   ): Promise<void> {
     const adapter = this.adapters[family];
     const now = Date.now();
-    // A parked Codex tab stays stopped: its task carries on in another tab.
-    const elsewhere = adapter.portable ? null : await this.continuations.continuesElsewhere(paseo, agentId);
+    // A parked Codex tab stays stopped: its task carries on in another tab. A failed lookup must not
+    // stop the limit from being recorded below.
+    const elsewhere = adapter.portable
+      ? null
+      : await this.continuations.continuesElsewhere(paseo, agentId).catch((error: unknown) => {
+          log(`could not find where ${agentId}'s task continues`, error);
+          return null;
+        });
     if (problem.kind === "limit" && problem.hit.kind === "window" && this.recentlyRedeemed(account.id)) {
       // This turn hit the limit just before a reset refilled it (another agent's failover or the
       // user spent one moments ago). The account has room again: carry on instead of switching.
