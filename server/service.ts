@@ -1367,6 +1367,7 @@ export class Service {
         family,
         accountId,
         pinned: Boolean(binding && binding.source !== "thread"),
+        selectionReason: binding?.source === "balance" ? binding.selectionReason : undefined,
         pendingAccountId: current && current !== accountId ? current : null,
         movable: this.adapters[family].portable || !agent.hasHistory,
       });

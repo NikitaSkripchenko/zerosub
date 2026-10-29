@@ -92,6 +92,7 @@ export const AgentRouteSchema = z.object({
    * continues the work in a new agent instead.
    */
   movable: z.boolean(),
+  selectionReason: z.enum(["weekly_reset", "headroom"]).optional(),
 });
 export type AgentRoute = z.infer<typeof AgentRouteSchema>;
 

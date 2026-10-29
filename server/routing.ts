@@ -56,6 +56,29 @@ export function mostAvailable(
   return candidates[0];
 }
 
+/** Prefer a weekly reset within a day only when every usable account has fresh, complete usage. */
+function soonestWeeklyReset(state: StoredState, usageOf: RouteInput["usageOf"], now: number): StoredAccount | undefined {
+  const candidates = accountsOf(state, "codex").filter((account) => isUsable(account, now));
+  const readings = candidates.map((account) => ({ account, usage: usageOf(account.id) }));
+  const complete = readings.every(({ usage }) => {
+    if (!usage || usage.error || usage.cached) return false;
+    const age = now - Date.parse(usage.fetchedAt);
+    const short = usage.windows.find((window) => window.label === "5-hour");
+    const weekly = usage.windows.find((window) => window.label === "Weekly");
+    return Number.isFinite(age) && age >= 0 && age <= 30 * 60_000 && !!short && !!weekly &&
+      [short, weekly].every((window) => Number.isFinite(window.usedPercent) && window.usedPercent >= 0 &&
+        window.usedPercent <= 100 && window.resetsAt !== null && Date.parse(window.resetsAt) > now);
+  });
+  if (!complete) return undefined;
+  // ponytail: a one-day horizon and 20% reserve are fixed; make them configurable if usage shows a need.
+  return readings.filter(({ usage }) => {
+    const weekly = usage!.windows.find((window) => window.label === "Weekly")!;
+    return usage!.windows.every((window) => window.usedPercent <= 80) &&
+      Date.parse(weekly.resetsAt!) - now <= 24 * 60 * 60_000;
+  }).sort((a, b) => Date.parse(a.usage!.windows.find((window) => window.label === "Weekly")!.resetsAt!) -
+    Date.parse(b.usage!.windows.find((window) => window.label === "Weekly")!.resetsAt!))[0]?.account;
+}
+
 export interface RouteInput {
   agentId: string;
   family: Family;
@@ -98,8 +121,9 @@ export function chooseAccount(state: StoredState, input: RouteInput): RouteDecis
   let bind: Binding | null = null;
 
   if (!account && fresh && input.balanceNewAgents && accounts.length > 1) {
-    account = mostAvailable(state, input.family, input.usageOf, input.now);
-    if (account) bind = { accountId: account.id, source: "balance", at };
+    const nearReset = input.family === "codex" ? soonestWeeklyReset(state, input.usageOf, input.now) : undefined;
+    account = nearReset ?? mostAvailable(state, input.family, input.usageOf, input.now);
+    if (account) bind = { accountId: account.id, source: "balance", at, selectionReason: nearReset ? "weekly_reset" : "headroom" };
   }
   if (!account) {
     // An imported Codex thread most likely came from the user's own CLI, so it belongs to that login.

@@ -119,6 +119,45 @@ describe("chooseAccount", () => {
     expect(decision?.bind?.source).toBe("balance");
   });
 
+  it("prefers a near weekly reset for new Codex agents with sufficient headroom", () => {
+    const soon = account({ id: "codex-soon", family: "codex" });
+    const later = account({ id: "codex-later", family: "codex" });
+    const reading = (weekly: number, reset: string): Usage => ({
+      ...usage(30), windows: [
+        { id: "primary", label: "5-hour", usedPercent: 30, resetsAt: "2026-09-23T16:00:00Z" },
+        { id: "secondary", label: "Weekly", usedPercent: weekly, resetsAt: reset },
+      ],
+    });
+    const decision = chooseAccount(stateWith([soon, later]), {
+      ...base, family: "codex", portable: false, balanceNewAgents: true, reason: "create",
+      usageOf: (id) => id === soon.id ? reading(60, "2026-09-24T10:00:00Z") : reading(40, "2026-09-27T10:00:00Z"),
+    });
+    expect(decision?.account.id).toBe(soon.id);
+    expect(decision?.bind?.selectionReason).toBe("weekly_reset");
+  });
+
+  it.each(["stale", "cached", "error", "missing", "short-limit", "weekly-limit", "past-reset"]) (
+    "falls back to headroom when near-reset data is %s", (condition) => {
+      const soon = account({ id: "codex-soon", family: "codex" });
+      const later = account({ id: "codex-later", family: "codex" });
+      const reading = (near: boolean): Usage => ({
+        ...usage(30),
+        fetchedAt: near && condition === "stale" ? "2026-09-23T10:00:00Z" : "2026-09-23T11:59:00Z",
+        cached: near && condition === "cached",
+        error: near && condition === "error" ? "offline" : null,
+        windows: [
+          { id: "primary", label: "5-hour", usedPercent: near && condition === "short-limit" ? 90 : near && condition === "missing" ? 60 : 30, resetsAt: "2026-09-23T16:00:00Z" },
+          ...(near && condition === "missing" ? [] : [{ id: "secondary", label: "Weekly", usedPercent: near && condition === "weekly-limit" ? 90 : near ? 60 : 40, resetsAt: near && condition === "past-reset" ? "2026-09-23T11:00:00Z" : near ? "2026-09-24T10:00:00Z" : "2026-09-27T10:00:00Z" }]),
+        ],
+      });
+      const decision = chooseAccount(stateWith([soon, later]), {
+        ...base, family: "codex", portable: false, balanceNewAgents: true, reason: "create",
+        usageOf: (id) => reading(id === soon.id),
+      });
+      expect(decision?.account.id).toBe(later.id);
+    },
+  );
+
   it("does not rebalance agents that already exist", () => {
     const state = stateWith([main, work]);
     const decision = chooseAccount(state, {
