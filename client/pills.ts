@@ -202,10 +202,10 @@ function buttonFor(
     });
   }
   if (wayOut.length > 0) items.unshift(...wayOut, { kind: "separator", id: "way-out-divider" });
-  if (route?.selectionReason) {
+  if (route?.selectionReason === "weekly_reset") {
     items.push({
       kind: "item", id: "selection-reason",
-      title: route.selectionReason === "weekly_reset" ? "Selected: weekly reset is near" : "Selected: most room left",
+      title: "Started here: weekly reset was near",
       icon: "Info", disabled: true, behavior: { kind: "action", onPress() {} },
     });
   }

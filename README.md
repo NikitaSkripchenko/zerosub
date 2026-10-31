@@ -53,7 +53,7 @@ Then open **Accounts (ZeroSub)** in the sidebar.
 
 ### Choose accounts for new agents
 
-Turn on **Spread new agents across accounts** to select an account from its usage. For Codex, ZeroSub prefers an account when its weekly limit resets within one day and both limits have at least 20% left. Usage for every available account must be complete and less than 30 minutes old. Otherwise, ZeroSub selects the account with the most room. Claude agents use the account with the most room. The account menu shows why ZeroSub selected an account. Existing agents stay on their accounts.
+Turn on **Spread new agents across accounts** to select an account from its usage. For ChatGPT agents, ZeroSub prefers an account when its weekly limit resets within one day and both limits have at least 20% left. Usage for every available account must be complete and less than 30 minutes old. Otherwise, ZeroSub selects the account with the most room. Claude agents use the account with the most room. When a near weekly reset was the reason, the agent's account menu says **Started here: weekly reset was near**. Existing agents stay on their accounts.
 
 ### Claude vs. ChatGPT when switching mid-conversation
 

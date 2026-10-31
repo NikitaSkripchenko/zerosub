@@ -634,7 +634,7 @@ function AutomationSettings({ theme }: { theme: Theme }) {
         />
         <SettingsSwitch
           label="Spread new agents across accounts"
-          hint="New Codex agents prefer a weekly reset within one day when both limits have at least 20% left. Otherwise, new agents use the account with the most room."
+          hint="New ChatGPT agents prefer a weekly reset within one day when both limits have at least 20% left. Otherwise, new agents use the account with the most room."
           value={settings.values.balanceNewAgents}
           disabled={settings.saving}
           onValueChange={(balanceNewAgents) => save({ balanceNewAgents })}
