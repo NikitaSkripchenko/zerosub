@@ -31,6 +31,7 @@ import {
   type UsageRead,
 } from "./adapter";
 import { FamilyResolver } from "./families";
+import { sameAccountIdentity } from "./account-identity";
 import { CodexContinuations } from "./continuations";
 import { CONTINUED_FROM_LABEL, continueInNewAgent, type Continuation } from "./handoff";
 import { removeHome } from "./homes";
@@ -1811,20 +1812,23 @@ export class Service {
 
     const state = await this.store.read();
     const existing = findAccount(state, session.accountId);
-    if (existing?.kind === "managed" && existing.identity && identity.identity && existing.identity !== identity.identity) {
+    if (existing?.kind === "managed" && existing.identity && identity.identity && !sameAccountIdentity(session.family, existing, identity)) {
       // Signing an account back in must not quietly turn it into a different login.
       if (session.home) await adapter.logout(session.home).catch(() => undefined);
       const expected = existing.email ?? existing.label;
+      // Only a Codex key can come without the email, and then it doesn't say which member signed in.
       return this.failLogin(
         session,
-        `You signed in as ${identity.email ?? "a different account"}, but this is ${expected}. Sign in as ${expected}, or use Add account for the other one.`,
+        identity.email
+          ? `You signed in as ${identity.email}, but this is ${expected}. Sign in as ${expected}, or use Add account for the other one.`
+          : `Couldn't tell which workspace member signed in, because Codex didn't return an email. Sign in again as ${expected}.`,
       );
     }
     // The CLI's own login is whatever the user signs it into; only added accounts must be distinct.
     const duplicate =
       identity.identity && existing?.kind !== "main"
         ? accountsOf(state, session.family).find(
-            (account) => account.id !== session.accountId && account.identity === identity.identity,
+            (account) => account.id !== session.accountId && sameAccountIdentity(session.family, account, identity, true),
           )
         : undefined;
     if (duplicate) {
